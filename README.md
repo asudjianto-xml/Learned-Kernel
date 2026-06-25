@@ -63,6 +63,7 @@ jupyter lab notebooks/ch01_geometry_hidden.ipynb
 |---|---|---|---|
 | 1 — The geometry hidden in every model | [`ch01_geometry_hidden`](notebooks/ch01_geometry_hidden.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/asudjianto-xml/Learned-Kernel/blob/main/notebooks/ch01_geometry_hidden.ipynb) | the implied weights of ridge / tree / k-NN; move the query and the knobs and watch the geometry redraw |
 | 2 — The kernel as the normal form | [`ch02_normal_form`](notebooks/ch02_normal_form.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/asudjianto-xml/Learned-Kernel/blob/main/notebooks/ch02_normal_form.ipynb) | KRR / GP / NW / SVM / attention as one machine; turn the kernel's bandwidth and ridge and watch all five predictions move |
+| 3 — From chosen to learned kernels | [`ch03_chosen_to_learned`](notebooks/ch03_chosen_to_learned.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/asudjianto-xml/Learned-Kernel/blob/main/notebooks/ch03_chosen_to_learned.ipynb) | the bandwidth U-curve, ARD length-scales fit on a held-out fold, and the (K,λ) scale degeneracy; slide ℓ against the learned-geometry baseline |
 
 *(rows added as chapters are published)*
 
