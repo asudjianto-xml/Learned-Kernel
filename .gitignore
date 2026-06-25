@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# environments
+.venv/
+venv/
+env/
+
+# jupytext pairs the .py source to .ipynb; keep both, but ignore nbconvert temp
+*.nbconvert.ipynb
+
+# OS / editor
+.DS_Store
+*.swp

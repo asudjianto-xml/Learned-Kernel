@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "learned-kernel"
+version = "0.1.0"
+description = "Companion code and notebooks for the book 'The Learned Kernel' (Agus Sudjianto)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Agus Sudjianto" }]
+keywords = ["kernel-methods", "machine-learning", "gaussian-process", "interpretability"]
+dependencies = [
+    "numpy>=1.23",
+    "scikit-learn>=1.2",
+    "matplotlib>=3.6",
+    "pandas>=1.5",
+]
+
+[project.optional-dependencies]
+notebooks = ["jupyter", "jupytext>=1.15", "ipywidgets>=8", "nbconvert>=7", "ipykernel"]
+dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/asudjianto-xml/Learned-Kernel"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+lkbook = ["_data/*.npz"]
