@@ -59,9 +59,9 @@ as a [jupytext](https://jupytext.readthedocs.io/) percent script (`.py`) paired 
 jupyter lab notebooks/ch01_geometry_hidden.ipynb
 ```
 
-| Chapter | Notebook | What you explore |
-|---|---|---|
-| 1 — The geometry hidden in every model | `ch01_geometry_hidden` | the implied weights of ridge / tree / k-NN; move the query and the knobs and watch the geometry redraw |
+| Chapter | Notebook | Run | What you explore |
+|---|---|---|---|
+| 1 — The geometry hidden in every model | [`ch01_geometry_hidden`](notebooks/ch01_geometry_hidden.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/asudjianto-xml/Learned-Kernel/blob/main/notebooks/ch01_geometry_hidden.ipynb) | the implied weights of ridge / tree / k-NN; move the query and the knobs and watch the geometry redraw |
 
 *(rows added as chapters are published)*
 
