@@ -46,6 +46,17 @@
 # numbers and figure match the printed chapter exactly — nothing here is re-implemented.
 
 # %%
+# On Google Colab (or any fresh env) install the companion package. No-op where
+# `lkbook` is already importable, so running locally costs nothing.
+try:
+    import lkbook  # noqa: F401
+except ModuleNotFoundError:
+    import subprocess, sys
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q",
+        "learned-kernel[notebooks] @ git+https://github.com/asudjianto-xml/Learned-Kernel.git"],
+        check=True)
+
+# %%
 # %matplotlib inline
 import numpy as np
 import pandas as pd
