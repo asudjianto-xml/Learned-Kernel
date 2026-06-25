@@ -8,6 +8,7 @@ on:
 jobs:
   test-and-run-notebooks:
     runs-on: ubuntu-latest
+    timeout-minutes: 20          # backstop: fail fast instead of hanging
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -17,12 +18,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[notebooks,dev]"
+      - name: Register the python3 kernel
+        run: python -m ipykernel install --user --name python3
       - name: Run tests
         run: pytest -q
       - name: Execute every chapter notebook
         run: |
-          for nb in notebooks/*.py; do
-            echo "::group::$nb"
-            jupytext --to notebook --execute "$nb" --output /tmp/_out.ipynb
-            echo "::endgroup::"
-          done
+          jupyter nbconvert --to notebook --execute --inplace \
+            --ExecutePreprocessor.timeout=300 \
+            --ExecutePreprocessor.kernel_name=python3 \
+            notebooks/*.ipynb
