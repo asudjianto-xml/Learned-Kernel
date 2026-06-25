@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "learned-kernel"
-version = "0.1.0"
+version = "0.4.0"
 description = "Companion code and notebooks for the book 'The Learned Kernel' (Agus Sudjianto)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,6 +13,7 @@ authors = [{ name = "Agus Sudjianto" }]
 keywords = ["kernel-methods", "machine-learning", "gaussian-process", "interpretability"]
 dependencies = [
     "numpy>=1.23",
+    "scipy>=1.9",
     "scikit-learn>=1.2",
     "matplotlib>=3.6",
     "pandas>=1.5",
