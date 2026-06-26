@@ -1,7 +1,7 @@
 """Chapter 7 — what makes a kernel learnable.
 
 Once a kernel carries many parameters its *geometry* can be overfit, and ordinary
-in-sample criteria credit the most flexible kernel dishonestly: a near-interpolating
+in-sample criteria credit the most flexible kernel with leakage: a near-interpolating
 kernel looks best on the very data it was fit on. The cure is to score the kernel on a
 held-out **query** fold it never touched. This module makes that operational on the
 running data with three demonstrations, reusing the ARD kernel of Chapter 3 and the leaf
@@ -12,7 +12,7 @@ kernel of Chapter 4 (NumPy / SciPy / scikit-learn only — no torch):
       — by in-sample fit and by held-out query risk. The leaf kernel nearly interpolates
       its support (support R2 ~ 1) so an in-sample criterion (SURE / GCV on the support)
       hands it all the fusion weight; query-fold selection collapses that weight to its
-      honest value and the leakage-free mixture generalizes better.
+      leakage-free value and the leakage-free mixture generalizes better.
 
   (b) **SURE.** Stein's unbiased risk estimate for a *fixed* KRR smoother is exactly
       unbiased for the denoising risk under only second-moment noise. On a controlled
@@ -292,7 +292,7 @@ def capacity_map(d, depths=(2, 3, 4, 6, 8, 10), Hs=(1, 2, 4, 8, 16, 32),
 # --- figures ------------------------------------------------------------------
 
 def make_credit_figure(d, seed=SEED):
-    """Fig 7.1 — honest vs dishonest credit. Left: per-channel support R2 vs query R2 (the
+    """Fig 7.1 — in-sample vs leakage-free credit. Left: per-channel support R2 vs query R2 (the
     leaf kernel's gap is the over-credit). Right: fusion weights under in-sample vs query
     selection, with the resulting test RMSE."""
     rows = per_channel_credit(d, seed=seed)
@@ -315,7 +315,7 @@ def make_credit_figure(d, seed=SEED):
     ax.set_xticks(xpos); ax.set_xticklabels(short, fontsize=9)
     ax.set_ylabel(r"$R^2$"); ax.set_ylim(0, 1.08); ax.legend(fontsize=8.5, loc="lower left")
     ax.set_title("Each candidate alone: the leaf kernel nearly interpolates its support\n"
-                 r"(support $R^2\!\approx\!1$) but its query $R^2$ is honest — that gap is "
+                 r"(support $R^2\!\approx\!1$) but its query $R^2$ is leakage-free — that gap is "
                  "the over-credit", fontsize=9.5)
 
     ax = axes[1]
@@ -329,7 +329,7 @@ def make_credit_figure(d, seed=SEED):
     ax.set_ylabel("selected fusion weight"); ax.set_ylim(0, 1.12)
     ax.legend(fontsize=8.5, loc="upper left")
     ax.set_title("In-sample selection routes all weight to the near-interpolating tree;\n"
-                 "query selection collapses it to its honest value and generalizes better",
+                 "query selection collapses it to its leakage-free value and generalizes better",
                  fontsize=9.5)
     return fig
 

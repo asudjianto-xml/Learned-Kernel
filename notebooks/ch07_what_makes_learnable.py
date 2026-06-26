@@ -19,7 +19,7 @@
 # *Companion notebook to **The Learned Kernel**, Ch. 7. Run top to bottom.*
 #
 # Once a kernel carries parameters, its **geometry** can be overfit — and ordinary
-# in-sample criteria credit the most flexible kernel dishonestly. A near-interpolating
+# in-sample criteria credit the most flexible kernel with leakage. A near-interpolating
 # kernel (the supervised leaf kernel of Ch. 4) looks best on the very data it was fit on.
 # The cure is to score the kernel on a held-out **query** fold it never touched. This
 # notebook shows the over-credit on the running data, shows SURE tracking the true risk
@@ -103,7 +103,7 @@ print(f"leaf weight  in-sample={sel['in_sample']['weights'][leaf]:.2f}  "
       f"query={sel['query']['weights'][leaf]:.2f}")
 assert sel["in_sample"]["weights"][leaf] > sel["query"]["weights"][leaf]
 assert sel["query"]["test_rmse"] <= sel["in_sample"]["test_rmse"] + 1e-6
-print("→ query selection collapses the tree to its honest weight and generalizes better.")
+print("→ query selection collapses the tree to its leakage-free weight and generalizes better.")
 
 # %%
 ch07.make_credit_figure(cal)
@@ -151,7 +151,7 @@ plt.show()
 # ## 7.5  Explorer — watch in-sample mislead while SURE tells the truth
 #
 # Slide the ridge λ on the controlled denoising problem. The in-sample residual always
-# prefers smaller λ (interpolation); SURE and the true risk agree on the honest λ. The
+# prefers smaller λ (interpolation); SURE and the true risk agree on the leakage-free λ. The
 # vertical line is your λ; the markers are the SURE-, in-sample-, and oracle-selected λ.
 
 # %%
