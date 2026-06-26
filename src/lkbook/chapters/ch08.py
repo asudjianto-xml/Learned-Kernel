@@ -1,49 +1,38 @@
 """Chapter 8 — spectral kernels and Bochner.
 
 By Bochner's theorem a continuous stationary kernel is the Fourier transform of a finite
-nonnegative spectral measure,
+nonnegative spectral measure on frequencies, so choosing a stationary geometry is choosing
+a measure on how fast the function may wiggle, and learning the kernel is learning that
+measure.
 
-    k(tau) = integral exp(i omega . tau) d mu(omega),   tau = x - x',
+Two design decisions hide in one kernel. The **readout** — the outer function turning
+embedding distance into similarity — sets the *roughness* of the function class. The
+**spectrum** below it sets only the *geometry*. The Laplace readout exp(-r/T) has a cusp at
+the origin that places the RKHS at Sobolev order (d+1)/2 (the rough Matern-1/2 / ReLU-NTK
+class tabular targets inhabit); the Gaussian readout exp(-r^2/T^2) is C-infinity and
+oversmooths (Theorem A).
 
-so *choosing a stationary geometry is choosing a measure on frequencies*, and learning the
-kernel is learning that measure. A single RBF bandwidth is one Gaussian bump in frequency
-space — one scale, one knee at |omega| ~ 1/T. A target that carries a smooth trend AND a
-periodic oscillation lives at two separated scales, and no single bandwidth can serve both.
+This module builds the **multi-scale spectral kernel (MS-SKM)** in its finite form, a NumPy
+mirror of the torch `skm.SpectralMixture` (finite/`spectral="free"` mode): a spectral
+embedding of cosine/sine features at a finite set of frequencies, read out through a
+**Laplace** exponential, with H banks fused convexly,
 
-The cure is a measure flexible enough to be a universal geometry yet cheap to learn: the
-**Gaussian spectral-mixture (SM) kernel**, the Fourier transform of a mixture of Q Gaussians
-in frequency (Wilson & Adams 2013). With weights w_q, frequency means mu_q and variances
-v_q, the 1-D stationary kernel is
+    K(x,x') = sum_h w_h exp(-||phi_h(x) - phi_h(x')|| / T_h),   w on the simplex.
 
-    k(tau) = sum_q w_q exp(-2 pi^2 tau^2 v_q) cos(2 pi mu_q tau),
-
-each term a cosine at frequency mu_q under a Gaussian envelope of bandwidth set by v_q. A
-point mass at mu_q = 0 is the constant kernel; a single Gaussian bump at mu = 0 is the RBF;
-a bump away from 0 is a periodic component the RBF cannot carry. The measure IS the geometry.
-
-This module mirrors the torch `skm.SpectralMixture` / `measure.gram` in NumPy/SciPy only.
-It demonstrates:
-
-  (i)  **recover periodic + smooth structure a single RBF cannot** — on a 1-D smooth-plus-
-       periodic target the SM kernel fits and *extrapolates the periodicity* while the RBF
-       goes flat outside the data; plus a California demonstration of the learned per-scale
-       spectral content;
-  (ii) **the roughness ladder** — the *readout* sets the regularity order, not the spectrum.
-       The Gaussian (RBF) readout exp(-r^2/T^2) is analytic at the origin and gives a C-infinity
-       class that oversmooths; the Laplace readout exp(-r/T) has a cusp and drops the RKHS to
-       H^{(d+1)/2}, the Matern-1/2 / ReLU-NTK roughness tabular targets inhabit (Theorem A).
+A single bank (H=1) fixes one bandwidth; fusing banks spans several scales. The continuous
+(density / Gauss-Hermite) parameterization and the "continuity is free" capacity statement
+are a later chapter; here we stay with the finite single and fused banks.
 
     python -m lkbook.chapters.ch08 --out-prefix fig8
 """
 from __future__ import annotations
 
 import argparse
+import functools
 
 import numpy as np
 import matplotlib.pyplot as plt
-from numpy.polynomial.hermite_e import hermegauss
-from scipy.optimize import minimize
-from threadpoolctl import threadpool_limits
+from scipy.spatial.distance import cdist
 
 from lkbook import load_california, set_style
 
@@ -51,466 +40,320 @@ SEED = 0
 
 
 def _single_thread(fn):
-    """The spectral-measure fit is thousands of tiny Gram solves; on a many-core box BLAS
-    thread oversubscription makes those small solves orders of magnitude slower. Pin BLAS to
-    one thread for the duration of the call."""
-    import functools
-
+    """Pin BLAS to one thread inside small-Gram solves (this box oversubscribes)."""
     @functools.wraps(fn)
-    def wrapped(*args, **kwargs):
-        with threadpool_limits(limits=1):
-            return fn(*args, **kwargs)
-
-    return wrapped
+    def wrap(*a, **k):
+        try:
+            from threadpoolctl import threadpool_limits
+            with threadpool_limits(1):
+                return fn(*a, **k)
+        except Exception:
+            return fn(*a, **k)
+    return wrap
 
 
 # =============================================================================
-# The Gaussian spectral-mixture (Bochner) kernel — NumPy mirror of skm
+# The spectral embedding and the Laplace-readout kernel
 # =============================================================================
 
-class SpectralMixtureKernel:
-    """Gaussian spectral-mixture kernel in 1-D (Wilson & Adams 2013), the Fourier transform
-    of a mixture of Q Gaussians in frequency:
+def spectral_embedding(x, omegas, amps=None, s=1.0):
+    """Map 1-D inputs to the cosine/sine spectral feature map at frequencies `omegas`:
+        psi(x)_k = a_k [cos(2 pi s omega_k x), sin(2 pi s omega_k x)].
+    The atomic spectral measure puts mass a_k^2 at frequency s*omega_k (Bochner)."""
+    x = np.asarray(x, float).ravel()
+    omegas = np.asarray(omegas, float)
+    a = np.ones_like(omegas) if amps is None else np.asarray(amps, float)
+    arg = 2.0 * np.pi * s * np.outer(x, omegas)                 # (n, K)
+    return np.concatenate([a * np.cos(arg), a * np.sin(arg)], axis=1)   # (n, 2K)
 
-        k(tau) = sum_q w_q exp(-2 pi^2 tau^2 v_q) cos(2 pi mu_q tau),   tau = x - x'.
 
-    Parameters are the spectral measure: weights w_q >= 0 (mass), means mu_q >= 0
-    (frequency), variances v_q > 0 (bandwidth). The kernel is PSD by Bochner (a nonnegative
-    mixture of Gaussians in frequency is a nonnegative measure) and unit-diagonal when the
-    weights sum to one (k(0) = sum_q w_q). It is the complete learnable stationary
-    parameterization: as Q grows the mixture approximates any spectral density.
-    """
+def laplace_gram(Pa, Pb, T):
+    """Laplace readout over the embedding: k = exp(-||phi(a)-phi(b)|| / T). Unit diagonal."""
+    return np.exp(-cdist(Pa, Pb) / T)
 
-    def __init__(self, w, mu, v):
-        self.w = np.asarray(w, float)
-        self.mu = np.asarray(mu, float)
-        self.v = np.asarray(v, float)
 
-    def profile(self, tau):
-        """k as a function of the lag tau (1-D array in, 1-D array out)."""
-        tau = np.asarray(tau, float)[..., None]                     # (..., 1)
-        env = np.exp(-2.0 * np.pi ** 2 * tau ** 2 * self.v)         # Gaussian envelope
-        cos = np.cos(2.0 * np.pi * self.mu * tau)                   # periodic carrier
-        return (self.w * env * cos).sum(-1)
+class SpectralLaplaceKernel:
+    """Finite multi-scale spectral kernel: H banks of a Laplace readout over a shared
+    spectral embedding, fused convexly. K(x,x') = sum_h w_h exp(-||phi(x)-phi(x')||/T_h)."""
+
+    def __init__(self, omegas, amps, T, w=None):
+        self.omegas = np.asarray(omegas, float)
+        self.amps = np.asarray(amps, float)
+        self.T = np.atleast_1d(np.asarray(T, float))            # one bandwidth per bank
+        H = len(self.T)
+        self.w = np.full(H, 1.0 / H) if w is None else np.asarray(w, float)
 
     def gram(self, A, B):
-        """Gram matrix between 1-D inputs A (n,) and B (m,)."""
-        A = np.asarray(A, float).ravel()
-        B = np.asarray(B, float).ravel()
-        return self.profile(A[:, None] - B[None, :])
+        Pa = spectral_embedding(A, self.omegas, self.amps)
+        Pb = spectral_embedding(B, self.omegas, self.amps)
+        return sum(wh * laplace_gram(Pa, Pb, Th) for wh, Th in zip(self.w, self.T))
 
-    def spectral_density(self, omega):
-        """The spectral measure as a density on (one-sided) frequency omega: a sum of Q
-        Gaussians, mass w_q at mean mu_q with variance v_q. This is the geometry plotted."""
-        omega = np.asarray(omega, float)[..., None]
-        g = np.exp(-0.5 * (omega - self.mu) ** 2 / self.v) / np.sqrt(2.0 * np.pi * self.v)
-        return (self.w * g).sum(-1)
+    def spectral_density(self, grid):
+        """The atomic spectral measure as mass a_k^2 at each frequency (for plotting)."""
+        return self.omegas, self.amps ** 2
 
 
 def rbf_kernel(A, B, ell):
-    """The RBF (squared-exponential) kernel — the single-Gaussian-at-zero special case of
-    Bochner. Its spectral measure is one Gaussian bump centered at omega = 0, so it carries
-    exactly one scale and cannot place mass at a nonzero frequency."""
-    A = np.asarray(A, float).ravel()
-    B = np.asarray(B, float).ravel()
-    tau = A[:, None] - B[None, :]
+    """The RBF (Gaussian) kernel: the single-Gaussian-at-zero special case of Bochner,
+    and the C-infinity rung of the roughness ladder."""
+    tau = cdist(np.asarray(A, float).reshape(-1, 1), np.asarray(B, float).reshape(-1, 1))
     return np.exp(-0.5 * tau ** 2 / ell ** 2)
 
 
+def laplace_readout(A, B, ell):
+    """A plain Laplace kernel exp(-|x-x'|/ell) on the raw input — the rough rung of the
+    ladder (same spectrum as a single scale, but a cusp readout)."""
+    tau = cdist(np.asarray(A, float).reshape(-1, 1), np.asarray(B, float).reshape(-1, 1))
+    return np.exp(-tau / ell)
+
+
 # =============================================================================
-# Fitting the spectral measure (least squares on a held-out fold; Ch. 7 discipline)
+# Reading the spectral measure from data (least-squares periodogram)
 # =============================================================================
 
-def _unpack(p, Q):
-    """Map an unconstrained vector to (w, mu, v) with w on the simplex, mu, v > 0."""
-    lw, lmu, lv = p[:Q], p[Q:2 * Q], p[2 * Q:]
-    w = np.exp(lw - lw.max()); w = w / w.sum()              # softmax -> simplex (unit diag)
-    mu = np.exp(lmu)                                        # frequency > 0
-    v = np.exp(lv)                                          # bandwidth variance > 0
-    return w, mu, v
-
-
-def _sm_profile_from_lag(T, w, mu, v):
-    """k(T) for a cached lag matrix T (any shape) and SM parameters."""
-    T = T[..., None]
-    return (w * np.exp(-2.0 * np.pi ** 2 * T ** 2 * v) * np.cos(2.0 * np.pi * mu * T)).sum(-1)
-
-
-def _dominant_frequency(X, y, mu_max, n_grid=400):
-    """Least-squares periodogram: the frequency whose sinusoid (over a smooth trend) best
-    explains y. Used to seed the spectral fit at the data's true frequency so recovery is
-    reproducible across environments rather than left to optimizer drift."""
-    X = X.ravel(); y = y.ravel()
-    trend = np.vstack([np.ones_like(X), X, X ** 2]).T          # quadratic trend basis
-    r = y - trend @ np.linalg.lstsq(trend, y, rcond=None)[0]    # detrend
-    best_f, best_ss = 0.1, np.inf
-    for f in np.linspace(0.1, mu_max, n_grid):
+def periodogram(X, y, freqs):
+    """Per-frequency variance explained by a sinusoid over a smooth trend: the data's
+    spectral density. This is the measure the spectral kernel places mass on."""
+    X = np.asarray(X, float).ravel(); y = np.asarray(y, float).ravel()
+    trend = np.vstack([np.ones_like(X), X, X ** 2]).T
+    r = y - trend @ np.linalg.lstsq(trend, y, rcond=None)[0]
+    tot = float(r @ r) + 1e-12
+    power = np.empty(len(freqs))
+    for i, f in enumerate(freqs):
         B = np.vstack([np.cos(2 * np.pi * f * X), np.sin(2 * np.pi * f * X)]).T
         resid = r - B @ np.linalg.lstsq(B, r, rcond=None)[0]
-        ss = float(resid @ resid)
-        if ss < best_ss:
-            best_ss, best_f = ss, float(f)
-    return best_f
+        power[i] = 1.0 - float(resid @ resid) / tot          # fraction of variance explained
+    return power
 
+
+def dominant_frequency(X, y, mu_max=6.0, n_grid=600):
+    """The frequency whose sinusoid best explains the detrended signal."""
+    freqs = np.linspace(0.1, mu_max, n_grid)
+    return float(freqs[np.argmax(periodogram(X, y, freqs))])
+
+
+# =============================================================================
+# Fitting the finite spectral kernel: data-chosen frequency support, query-fold T
+# =============================================================================
 
 @_single_thread
-def fit_sm_kernel(Xtr, ytr, Q=4, lam=1e-4, seed=SEED, n_restarts=3, mu_max=4.0):
-    """Fit the spectral measure of a Q-component SM kernel by minimizing held-out (query-fold)
-    KRR error, the leakage-free selection criterion of Chapter 7. The support fold fits the
-    ridge solution; the query fold scores the spectral measure. Returns the fitted kernel and
-    the selected ridge solver bound to the full training set."""
-    Xtr = np.asarray(Xtr, float).ravel()
-    ytr = np.asarray(ytr, float).ravel()
+def fit_spectral_laplace(Xtr, ytr, mu_max=6.0, lam=1e-3, seed=SEED):
+    """Fit a finite spectral-Laplace kernel. The frequency support is read from the data
+    (periodogram: a trend atom near zero plus the dominant frequency and its first
+    harmonic), so it is reproducible; the bandwidth T is selected on a held-out query fold
+    (the Chapter 7 discipline). Returns (kernel, predict, true_freq_support)."""
+    Xtr = np.asarray(Xtr, float).ravel(); ytr = np.asarray(ytr, float).ravel()
+    f_star = dominant_frequency(Xtr, ytr, mu_max)
+    omegas = np.array([0.0, 0.5, f_star, 2.0 * f_star])        # trend atoms + periodic + harmonic
+    amps = np.array([1.0, 1.0, 1.0, 1.0])
+
     rng = np.random.RandomState(seed)
-    ns = len(Xtr) // 2
-    perm = rng.permutation(len(Xtr))
-    s_idx, q_idx = perm[:ns], perm[ns:]                     # support / query split
+    perm = rng.permutation(len(Xtr)); ns = len(Xtr) // 2
+    s_idx, q_idx = perm[:ns], perm[ns:]
     Xs, ys, Xq, yq = Xtr[s_idx], ytr[s_idx], Xtr[q_idx], ytr[q_idx]
     ybar = ys.mean()
-    Tss = Xs[:, None] - Xs[None, :]                         # cache the lag matrices once
-    Tqs = Xq[:, None] - Xs[None, :]
-    Iss = lam * np.eye(len(Xs))
+    Ps, Pq = spectral_embedding(Xs, omegas, amps), spectral_embedding(Xq, omegas, amps)
 
-    def query_loss(p):
-        w, mu, v = _unpack(p, Q)
-        Kss = _sm_profile_from_lag(Tss, w, mu, v)
-        alpha = np.linalg.solve(Kss + Iss, ys - ybar)
-        pred = _sm_profile_from_lag(Tqs, w, mu, v) @ alpha + ybar
-        return float(np.mean((pred - yq) ** 2))
+    best_T, best_loss = None, np.inf
+    for T in np.logspace(-1.0, 1.5, 40):                       # query-fold bandwidth scan
+        Kss = laplace_gram(Ps, Ps, T)
+        alpha = np.linalg.solve(Kss + lam * np.eye(ns), ys - ybar)
+        pred = laplace_gram(Pq, Ps, T) @ alpha + ybar
+        loss = float(np.mean((pred - yq) ** 2))
+        if loss < best_loss:
+            best_loss, best_T = loss, T
 
-    f_star = _dominant_frequency(Xtr, ytr, mu_max)         # periodogram seed (reproducible)
-    best = None
-    for r in range(n_restarts + 1):
-        if r == 0:
-            # seed one low-frequency (trend) atom near DC and one at the data frequency
-            mu0 = np.array([0.05] + [f_star] * (Q - 1)) if Q > 1 else np.array([f_star])
-            lv0 = np.log(np.array([2e-3] + [0.05] * (Q - 1)) if Q > 1 else np.array([0.05]))
-        else:
-            rs = np.random.RandomState(seed + r)
-            mu0 = np.linspace(0.05, mu_max, Q) * (0.5 + rs.rand(Q))   # spread restarts
-            lv0 = np.log(0.02 + 0.05 * rs.rand(Q))
-        p0 = np.concatenate([np.zeros(Q), np.log(np.clip(mu0, 1e-2, None)), lv0])
-        res = minimize(query_loss, p0, method="L-BFGS-B",
-                       options=dict(maxiter=300, ftol=1e-10, gtol=1e-8))
-        if best is None or res.fun < best.fun:
-            best = res
-
-    w, mu, v = _unpack(best.x, Q)
-    kernel = SpectralMixtureKernel(w, mu, v)
-    # refit ridge on the full training set with the selected measure
+    kernel = SpectralLaplaceKernel(omegas, amps, best_T)
     K = kernel.gram(Xtr, Xtr)
     alpha = np.linalg.solve(K + lam * np.eye(len(Xtr)), ytr - ytr.mean())
 
     def predict(Xnew):
-        Xnew = np.asarray(Xnew, float).ravel()
-        return kernel.gram(Xnew, Xtr) @ alpha + ytr.mean()
+        return kernel.gram(np.asarray(Xnew, float).ravel(), Xtr) @ alpha + ytr.mean()
 
-    return kernel, predict, float(best.fun)
+    return kernel, predict, f_star
 
 
 @_single_thread
-def fit_rbf(Xtr, ytr, lam=1e-4, seed=SEED, n_ell=40):
-    """Fit a single RBF bandwidth by the same query-fold criterion, so the comparison to the
-    SM kernel is on equal footing: one bandwidth chosen as well as cross-validation allows."""
-    Xtr = np.asarray(Xtr, float).ravel()
-    ytr = np.asarray(ytr, float).ravel()
+def fit_rbf(Xtr, ytr, lam=1e-3, seed=SEED):
+    """Best single RBF bandwidth by the same query-fold criterion — the one-scale baseline."""
+    Xtr = np.asarray(Xtr, float).ravel(); ytr = np.asarray(ytr, float).ravel()
     rng = np.random.RandomState(seed)
-    ns = len(Xtr) // 2
-    perm = rng.permutation(len(Xtr))
+    perm = rng.permutation(len(Xtr)); ns = len(Xtr) // 2
     s_idx, q_idx = perm[:ns], perm[ns:]
     Xs, ys, Xq, yq = Xtr[s_idx], ytr[s_idx], Xtr[q_idx], ytr[q_idx]
     ybar = ys.mean()
-
-    ells = np.logspace(-2.0, 1.0, n_ell)
     best_ell, best_loss = None, np.inf
-    for ell in ells:
+    for ell in np.logspace(-2.5, 1.0, 60):
         Kss = rbf_kernel(Xs, Xs, ell)
-        alpha = np.linalg.solve(Kss + lam * np.eye(len(Xs)), ys - ybar)
+        alpha = np.linalg.solve(Kss + lam * np.eye(ns), ys - ybar)
         pred = rbf_kernel(Xq, Xs, ell) @ alpha + ybar
         loss = float(np.mean((pred - yq) ** 2))
         if loss < best_loss:
-            best_ell, best_loss = ell, loss
+            best_loss, best_ell = loss, ell
 
     K = rbf_kernel(Xtr, Xtr, best_ell)
     alpha = np.linalg.solve(K + lam * np.eye(len(Xtr)), ytr - ytr.mean())
 
     def predict(Xnew):
-        Xnew = np.asarray(Xnew, float).ravel()
-        return rbf_kernel(Xnew, Xtr, best_ell) @ alpha + ytr.mean()
+        return rbf_kernel(np.asarray(Xnew, float).ravel(), Xtr, best_ell) @ alpha + ytr.mean()
 
-    return best_ell, predict, best_loss
+    return best_ell, predict
 
 
 # =============================================================================
-# The smooth-plus-periodic target (generated INSIDE ch08, not in data.py)
+# Demonstrations
 # =============================================================================
 
 def smooth_plus_periodic(n=120, x_max=1.0, freq=3.0, noise=0.05, seed=SEED):
-    """A 1-D target with two separated scales: a smooth quadratic trend plus a periodic
-    component at a definite frequency. The smooth part needs a long correlation length; the
-    oscillation needs a short one. No single RBF bandwidth can fit both — the motivating
-    failure of one bandwidth, and the clean case for a spectral measure with two peaks.
-
-    Returns (Xtr, ytr, true_freq); the periodic component is sin(2 pi freq x)."""
+    """A 1-D target at two separated scales: a smooth quadratic trend plus a periodic
+    oscillation. No single RBF bandwidth serves both. periodic = 0.5 sin(2 pi freq x)."""
     rng = np.random.RandomState(seed)
-    X = np.sort(rng.uniform(0.0, x_max, n))
-    trend = 0.8 * (X - 0.5) ** 2                            # smooth low-frequency trend
-    periodic = 0.5 * np.sin(2.0 * np.pi * freq * X)         # periodic at `freq`
-    y = trend + periodic + noise * rng.randn(n)
-    return X, y, float(freq)
+    X = np.sort(rng.rand(n) * x_max)
+    trend = 0.8 * (X - 0.5) ** 2
+    periodic = 0.5 * np.sin(2.0 * np.pi * freq * X)
+    return X, trend + periodic + noise * rng.randn(n), float(freq)
 
 
-def periodic_extrapolation_demo(freq=3.0, n=80, x_max=1.0, x_test_max=2.0,
-                                Q=4, seed=SEED):
-    """The headline demonstration. Fit the SM kernel and a single RBF on a smooth-plus-periodic
-    target observed on [0, x_max]; evaluate on [0, x_test_max] which runs BEYOND the data hull.
-    The SM kernel carries the oscillation forward (the periodic component continues); the RBF
-    reverts to the mean and goes flat. Returns a dict of arrays and recovered numbers."""
+def _rmse(p, y):
+    return float(np.sqrt(np.mean((np.asarray(p) - np.asarray(y)) ** 2)))
+
+
+def periodic_extrapolation_demo(freq=3.0, n=80, x_max=1.0, x_test_max=2.0, seed=SEED):
+    """The headline demonstration: the finite spectral-Laplace kernel carries the oscillation
+    beyond the data range (it learned a frequency); the RBF reverts to the mean (it learned
+    only a length scale)."""
     X, y, true_freq = smooth_plus_periodic(n=n, x_max=x_max, freq=freq, seed=seed)
-    kernel, sm_pred, sm_qloss = fit_sm_kernel(X, y, Q=Q, seed=seed)
-    ell, rbf_pred, rbf_qloss = fit_rbf(X, y, seed=seed)
+    sm_kernel, sm_pred, f_star = fit_spectral_laplace(X, y, mu_max=2.0 * freq, seed=seed)
+    ell, rbf_pred = fit_rbf(X, y, seed=seed)
 
-    Xg = np.linspace(0.0, x_test_max, 400)
-    trend_g = 0.8 * (Xg - 0.5) ** 2
-    periodic_g = 0.5 * np.sin(2.0 * np.pi * true_freq * Xg)
-    truth_g = trend_g + periodic_g
-    sm_g, rbf_g = sm_pred(Xg), rbf_pred(Xg)
-
-    # test region strictly beyond the data hull: [x_max, x_test_max]
-    out = Xg > x_max
-    sm_extrap_rmse = float(np.sqrt(np.mean((sm_g[out] - truth_g[out]) ** 2)))
-    rbf_extrap_rmse = float(np.sqrt(np.mean((rbf_g[out] - truth_g[out]) ** 2)))
-
-    # in-hull test points (fresh draw on [0, x_max])
-    Xte, yte, _ = smooth_plus_periodic(n=400, x_max=x_max, freq=freq, noise=0.0,
-                                       seed=seed + 99)
-    sm_test_rmse = float(np.sqrt(np.mean((sm_pred(Xte) - yte) ** 2)))
-    rbf_test_rmse = float(np.sqrt(np.mean((rbf_pred(Xte) - yte) ** 2)))
-
-    # recovered dominant frequency: the SM mean carrying the most off-DC mass
-    nonzero = kernel.mu > 0.3                               # drop the trend/DC component
-    if nonzero.any():
-        dom = kernel.mu[nonzero][np.argmax(kernel.w[nonzero])]
-    else:
-        dom = kernel.mu[np.argmax(kernel.w)]
-    recovered_freq = float(dom)
-
-    return dict(X=X, y=y, Xg=Xg, truth_g=truth_g, sm_g=sm_g, rbf_g=rbf_g,
-                x_max=x_max, x_test_max=x_test_max, true_freq=true_freq,
-                recovered_freq=recovered_freq, ell=float(ell),
-                sm_test_rmse=sm_test_rmse, rbf_test_rmse=rbf_test_rmse,
-                sm_extrap_rmse=sm_extrap_rmse, rbf_extrap_rmse=rbf_extrap_rmse,
-                kernel=kernel)
+    Xg = np.linspace(0, x_test_max, 400)
+    truth = 0.8 * (Xg - 0.5) ** 2 + 0.5 * np.sin(2.0 * np.pi * true_freq * Xg)
+    in_hull, extrap = Xg <= x_max, Xg > x_max
+    smg, rbfg = sm_pred(Xg), rbf_pred(Xg)
+    return {
+        "X": X, "y": y, "Xg": Xg, "truth": truth, "sm": smg, "rbf": rbfg,
+        "x_max": x_max, "true_freq": true_freq, "recovered_freq": f_star, "ell": ell,
+        "sm_test_rmse": _rmse(smg[in_hull], truth[in_hull]),
+        "rbf_test_rmse": _rmse(rbfg[in_hull], truth[in_hull]),
+        "sm_extrap_rmse": _rmse(smg[extrap], truth[extrap]),
+        "rbf_extrap_rmse": _rmse(rbfg[extrap], truth[extrap]),
+    }
 
 
-# =============================================================================
-# The roughness ladder — the readout sets the order, not the spectrum
-# =============================================================================
-
-def laplace_readout(A, B, ell):
-    """Laplace readout exp(-|tau|/ell): a cusp at tau = 0, RKHS H^{(d+1)/2} (Matern-1/2)."""
-    A = np.asarray(A, float).ravel()
-    B = np.asarray(B, float).ravel()
-    tau = A[:, None] - B[None, :]
-    return np.exp(-np.abs(tau) / ell)
-
-
-def _krr_fit_predict(Kss, ys, Kqs, ybar, lam):
-    alpha = np.linalg.solve(Kss + lam * np.eye(len(ys)), ys - ybar)
-    return Kqs @ alpha + ybar
-
-
-@_single_thread
-def roughness_ladder_demo(n=90, x_max=1.0, noise=0.03, seed=SEED, lam=1e-5):
-    """The readout sets the roughness. On a rough target (a Brownian-like sample path, which
-    lives in the low-Sobolev class), fit KRR under three readouts with the bandwidth chosen by
-    a query fold: Gaussian/RBF (C-infinity, oversmooths), Laplace (cusp, H^{(d+1)/2}, the
-    Matern-1/2 / ReLU-NTK class), and a finer view. The Laplace readout tracks the kinks the
-    RBF rounds off. Returns curves and test RMSEs."""
+def _ou_path(grid, ell=0.05, seed=SEED):
+    """A sample path of the Ornstein-Uhlenbeck process (the Laplace/Matern-1/2 GP) on `grid`
+    — an H^{1/2} rough function: continuous but nowhere smooth, the regularity tabular
+    targets carry and the Gaussian RKHS excludes."""
     rng = np.random.RandomState(seed)
-    X = np.sort(rng.uniform(0.0, x_max, n))
-    # a rough target: integrated white noise (a discretized Brownian path), in H^{1/2-}
-    grid = np.linspace(0, x_max, 600)
-    incr = rng.randn(len(grid)) * np.sqrt(grid[1] - grid[0])
-    path = np.cumsum(incr)
-    path = path - path.mean()
-    f_true = np.interp(X, grid, path)
-    y = f_true + noise * rng.randn(n)
+    g = np.sort(grid)
+    K = np.exp(-cdist(g.reshape(-1, 1), g.reshape(-1, 1)) / ell)   # Laplace covariance
+    L = np.linalg.cholesky(K + 1e-8 * np.eye(len(g)))
+    return g, L @ rng.randn(len(g))
 
-    ns = len(X) // 2
-    perm = rng.permutation(len(X))
-    s_idx, q_idx = perm[:ns], perm[ns:]
-    Xs, ys, Xq, yq = X[s_idx], y[s_idx], X[q_idx], y[q_idx]
-    ybar = ys.mean()
-    ells = np.logspace(-2.5, 0.0, 50)
 
-    def select(kfun):
-        best, bl = None, np.inf
-        for ell in ells:
-            pred = _krr_fit_predict(kfun(Xs, Xs, ell), ys, kfun(Xq, Xs, ell), ybar, lam)
-            l = np.mean((pred - yq) ** 2)
-            if l < bl:
-                best, bl = ell, l
-        return best
+def roughness_ladder_demo(n=200, ell_truth=0.04, seed=SEED):
+    """The readout sets the order, not the spectrum: fit a genuinely rough (H^{1/2}) target —
+    an Ornstein-Uhlenbeck sample path — with a Gaussian (RBF, C-infinity) readout and a
+    Laplace (cusp, H^{(d+1)/2}) readout. The Gaussian RKHS does not contain the rough
+    component, so it oversmooths; the Laplace readout reaches it (Theorem A)."""
+    rng = np.random.RandomState(seed)
+    Xg, fg = _ou_path(np.linspace(0, 1, 400), ell=ell_truth, seed=seed)   # dense truth path
+    idx = np.sort(rng.choice(len(Xg), n, replace=False))                  # observe a subset
+    X, y = Xg[idx], fg[idx] + 0.02 * rng.randn(n)
+    out = {"X": X, "y": y, "Xg": Xg, "truth": fg}
+    for name, kfun in [("rbf", rbf_kernel), ("laplace", laplace_readout)]:
+        best = min(np.logspace(-2, 0.5, 40),
+                   key=lambda e: _fit_eval(kfun, X, y, e))
+        K = kfun(X, X, best); a = np.linalg.solve(K + 1e-3 * np.eye(n), y - y.mean())
+        out[name] = kfun(Xg, X, best) @ a + y.mean()
+        out[name + "_rmse"] = _rmse(out[name], fg)
+    return out
 
-    Xg = np.linspace(0, x_max, 400)
-    truth_g = np.interp(Xg, grid, path)
+
+def _fit_eval(kfun, X, y, ell, lam=1e-3, seed=SEED):
+    rng = np.random.RandomState(seed); perm = rng.permutation(len(X)); ns = len(X) // 2
+    s, q = perm[:ns], perm[ns:]; ybar = y[s].mean()
+    K = kfun(X[s], X[s], ell); a = np.linalg.solve(K + lam * np.eye(ns), y[s] - ybar)
+    return _rmse(kfun(X[q], X[s], ell) @ a + ybar, y[q])
+
+
+def california_spectral_density(features=("MedInc", "Latitude"), n=1500, seed=SEED):
+    """Read the per-feature spectral measure off California by periodogram: which features
+    carry a smooth trend (low-frequency mass) versus structure at a definite scale (a peak)."""
+    d = load_california()
+    rng = np.random.RandomState(seed)
+    idx = rng.choice(d.n, min(n, d.n), replace=False)
+    freqs = np.linspace(0.05, 3.0, 120)
     out = {}
-    rmse = {}
-    for name, kfun in [("RBF (Gaussian, C-inf)", rbf_kernel),
-                       ("Laplace (cusp, H^{(d+1)/2})", laplace_readout)]:
-        ell = select(kfun)
-        alpha = np.linalg.solve(kfun(X, X, ell) + lam * np.eye(len(X)), y - y.mean())
-        out[name] = kfun(Xg, X, ell) @ alpha + y.mean()
-        rmse[name] = float(np.sqrt(np.mean((out[name] - truth_g) ** 2)))
-
-    return dict(X=X, y=y, Xg=Xg, truth_g=truth_g, curves=out, rmse=rmse)
-
-
-# =============================================================================
-# California demonstration: the learned per-feature spectral density
-# =============================================================================
-
-def california_spectral_density(feature="MedInc", Q=4, n_train=400, seed=SEED):
-    """Fit the SM kernel on a single standardized California feature against the target, and
-    read off the learned spectral density. A feature carrying a smooth trend shows
-    low-frequency mass; structure at a definite scale shows a peak away from zero. Returns the
-    fitted kernel, the recovered density on a frequency grid, and the SM-vs-RBF query loss."""
-    cal = load_california()
-    j = cal.col(feature)
-    rng = np.random.RandomState(seed)
-    idx = rng.choice(cal.n, min(n_train, cal.n), replace=False)
-    X = cal.Xtr[idx, j]
-    y = cal.ytr[idx]
-    kernel, sm_pred, sm_qloss = fit_sm_kernel(X, y, Q=Q, seed=seed, mu_max=3.0)
-    _, _, rbf_qloss = fit_rbf(X, y, seed=seed)
-    omega = np.linspace(0, 3.0, 400)
-    dens = kernel.spectral_density(omega)
-    lowfreq_mass = float(kernel.w[kernel.mu < 0.5].sum())       # share of mass near DC
-    return dict(kernel=kernel, omega=omega, density=dens, feature=feature,
-                lowfreq_mass=lowfreq_mass,
-                sm_qloss=float(sm_qloss), rbf_qloss=float(rbf_qloss))
+    for f in features:
+        xj = d.Xtr[idx, d.col(f)]
+        order = np.argsort(xj)
+        power = periodogram(xj[order], d.ytr[idx][order], freqs)
+        power = np.clip(power, 0, None); power = power / (power.sum() + 1e-12)
+        low_mass = float(power[freqs < 0.5].sum())
+        out[f] = {"freqs": freqs, "power": power, "peak": float(freqs[np.argmax(power)]),
+                  "low_freq_mass": low_mass}
+    return out
 
 
 # =============================================================================
-# Density parameterization: Gauss-Hermite quadrature of a log-frequency density
+# Figures
 # =============================================================================
 
-def density_atoms_gauss_hermite(mu_log, gamma, G):
-    """Discretize one Gaussian component on log-frequency (mean mu_log, std gamma) into G
-    atoms by Gauss-Hermite quadrature, mirroring skm.measure.density_to_atoms. The trainable
-    size is the 2 numbers (mu_log, gamma); G is a numerical resolution, not a parameter
-    (Corollary B.1, 'continuity is free'). Returns (omega_atoms, weights) summing to one."""
-    nodes, wts = hermegauss(G)                              # probabilists' Hermite (weight e^{-x^2/2})
-    wts = wts / wts.sum()                                   # normalize to a probability rule
-    omega = np.exp(mu_log + gamma * nodes)                  # log-normal frequency atoms
-    return omega, wts
-
-
-# =============================================================================
-# Figures (return a Figure; no Agg at import)
-# =============================================================================
-
-def make_periodic_figure(seed=SEED):
-    """Figure 8.1 companion: the SM kernel recovers and EXTRAPOLATES the periodic component a
-    single RBF cannot. Left: the fit and the extrapolation beyond the data hull. Right: the
-    learned spectral measure (a sharp peak at the true frequency) vs the RBF's single bump at
-    zero."""
-    d = periodic_extrapolation_demo(seed=seed)
-    fig, axes = plt.subplots(1, 2, figsize=(12.2, 4.6), constrained_layout=True)
-
-    ax = axes[0]
-    ax.scatter(d["X"], d["y"], s=14, c="#444", zorder=4, label="data (observed on [0,1])")
-    ax.plot(d["Xg"], d["truth_g"], color="#888", lw=1.4, ls=":", label="true signal")
-    ax.plot(d["Xg"], d["sm_g"], color="#2ca02c", lw=2.0,
-            label=f"spectral mixture (extrap RMSE {d['sm_extrap_rmse']:.2f})")
-    ax.plot(d["Xg"], d["rbf_g"], color="#c44e52", lw=2.0,
-            label=f"single RBF (extrap RMSE {d['rbf_extrap_rmse']:.2f})")
-    ax.axvspan(d["x_max"], d["x_test_max"], color="#f0f0f0", zorder=0)
-    ax.text(0.5 * (d["x_max"] + d["x_test_max"]), ax.get_ylim()[0], " extrapolation",
-            va="bottom", ha="center", fontsize=9, color="#555")
-    ax.set_xlabel("x"); ax.set_ylabel("y")
-    ax.set_title("Smooth + periodic: the spectral kernel carries the\noscillation forward; "
-                 "the RBF reverts to the mean", fontsize=10)
-    ax.legend(fontsize=8, loc="upper left")
-
-    ax = axes[1]
-    k = d["kernel"]
-    omega = np.linspace(0, 5.0, 500)
-    ax.plot(omega, k.spectral_density(omega), color="#2ca02c", lw=2.0,
-            label="learned spectral measure")
-    ax.axvline(d["true_freq"], color="#888", ls=":", lw=1.4,
-               label=f"true frequency = {d['true_freq']:.1f}")
-    ax.axvline(0.0, color="#c44e52", ls="--", lw=1.4, label="RBF mass (at 0 only)")
-    ax.set_xlabel("frequency $\\omega$"); ax.set_ylabel("spectral density")
-    ax.set_title(f"The measure is the geometry. Recovered peak\n at "
-                 f"$\\mu \\approx$ {d['recovered_freq']:.2f} (true {d['true_freq']:.1f})",
-                 fontsize=10)
-    ax.legend(fontsize=8)
+def make_roughness_figure(seed=SEED):
+    r = roughness_ladder_demo(seed=seed)
+    fig, ax = plt.subplots(figsize=(7.6, 4.4), constrained_layout=True)
+    ax.scatter(r["X"], r["y"], s=10, c="#999999", label="data (rough target)", zorder=1)
+    ax.plot(r["Xg"], r["truth"], "k--", lw=1, label="truth", zorder=2)
+    ax.plot(r["Xg"], r["rbf"], color="#3b6ea5", lw=2,
+            label=fr"RBF readout ($C^\infty$), RMSE {r['rbf_rmse']:.3f}")
+    ax.plot(r["Xg"], r["laplace"], color="#c44e52", lw=2,
+            label=fr"Laplace readout ($H^{{(d+1)/2}}$), RMSE {r['laplace_rmse']:.3f}")
+    ax.set_title("The readout sets the roughness: same data, two outer functions.\n"
+                 "The Gaussian oversmooths the kinks; the Laplace cusp reaches them.", fontsize=10)
+    ax.set_xlabel("x"); ax.set_ylabel("y"); ax.legend(fontsize=8)
     return fig
 
 
-def make_roughness_figure(seed=SEED):
-    """Figure 8.2 companion: the readout sets the roughness. Three radial profiles with their
-    RKHS orders, and a fit under the RBF (oversmooths) vs the Laplace readout (tracks the
-    kinks) on a rough target."""
-    fig, axes = plt.subplots(1, 2, figsize=(12.2, 4.6), constrained_layout=True)
-
+def make_periodic_figure(seed=SEED):
+    d = periodic_extrapolation_demo(seed=seed)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.4), constrained_layout=True,
+                             gridspec_kw={"width_ratios": [1.6, 1]})
     ax = axes[0]
-    r = np.linspace(0, 3, 400)
-    ax.plot(r, np.exp(-r ** 2), color="#3b6ea5", lw=2.0, label="RBF $e^{-r^2/T^2}$  ($C^\\infty$)")
-    ax.plot(r, np.exp(-r), color="#2ca02c", lw=2.0,
-            label="Laplace $e^{-r/T}$  ($H^{(d+1)/2}$)")
-    step = np.where(r < 1e-9, 1.0, 0.0)
-    ax.plot([0, 0, 3], [1, 0, 0], color="#c44e52", lw=2.0,
-            label="tree (step, discontinuous)")
-    ax.scatter([0], [1], color="#c44e52", zorder=5, s=20)
-    ax.set_xlabel("radial distance $r$"); ax.set_ylabel("$k(r)$")
-    ax.set_title("The readout sets the roughness order.\nLaplace has a cusp at $r=0$; "
-                 "RBF is analytic", fontsize=10)
-    ax.legend(fontsize=8.5)
+    ax.axvspan(d["x_max"], d["Xg"].max(), color="#f0f0f0", zorder=0, label="extrapolation")
+    ax.scatter(d["X"], d["y"], s=12, c="#999999", zorder=2, label="training data")
+    ax.plot(d["Xg"], d["truth"], "k--", lw=1, zorder=3, label="truth")
+    ax.plot(d["Xg"], d["sm"], color="#c44e52", lw=2, zorder=4,
+            label=f"spectral-Laplace (extrap RMSE {d['sm_extrap_rmse']:.2f})")
+    ax.plot(d["Xg"], d["rbf"], color="#3b6ea5", lw=2, zorder=4,
+            label=f"RBF (extrap RMSE {d['rbf_extrap_rmse']:.2f})")
+    ax.set_title("A geometry that knows the frequency extrapolates the oscillation;\n"
+                 "one that knows only a length scale flattens.", fontsize=10)
+    ax.set_xlabel("x"); ax.set_ylabel("y"); ax.legend(fontsize=8)
 
-    d = roughness_ladder_demo(seed=seed)
-    ax = axes[1]
-    ax.scatter(d["X"], d["y"], s=14, c="#444", zorder=4, label="data (rough target)")
-    ax.plot(d["Xg"], d["truth_g"], color="#888", lw=1.2, ls=":", label="true path")
-    colors = {"RBF (Gaussian, C-inf)": "#3b6ea5", "Laplace (cusp, H^{(d+1)/2})": "#2ca02c"}
-    names = {"RBF (Gaussian, C-inf)": "RBF readout", "Laplace (cusp, H^{(d+1)/2})": "Laplace readout"}
-    for name, curve in d["curves"].items():
-        ax.plot(d["Xg"], curve, color=colors[name], lw=1.8,
-                label=f"{names[name]} (RMSE {d['rmse'][name]:.2f})")
-    ax.set_xlabel("x"); ax.set_ylabel("y")
-    ax.set_title("Same spectrum, different readout: the Laplace fit\ntracks kinks the RBF "
-                 "rounds off", fontsize=10)
-    ax.legend(fontsize=8.5)
+    ax2 = axes[1]
+    freqs = np.linspace(0.1, 6.0, 400)
+    ax2.plot(freqs, periodogram(d["X"], d["y"], freqs), color="#c44e52")
+    ax2.axvline(d["true_freq"], ls="--", color="k", lw=1, label=f"true {d['true_freq']:.1f}")
+    ax2.axvline(d["recovered_freq"], ls=":", color="#c44e52", lw=1.5,
+                label=f"recovered {d['recovered_freq']:.2f}")
+    ax2.set_title("Recovered spectral measure", fontsize=10)
+    ax2.set_xlabel("frequency ω"); ax2.set_ylabel("variance explained"); ax2.legend(fontsize=8)
     return fig
 
 
 def make_california_density_figure(features=("MedInc", "Latitude"), seed=SEED):
-    """The measure is the geometry, on the running data. Fit the SM kernel per California
-    feature and read off the learned spectral density: a smooth-trend feature concentrates
-    mass near zero frequency, a feature carrying structure at a definite scale puts a peak
-    away from zero. Returns the figure and a dict of recovered numbers per feature."""
-    fig, axes = plt.subplots(1, len(features), figsize=(6.1 * len(features), 4.4),
-                             constrained_layout=True)
-    if len(features) == 1:
-        axes = [axes]
-    out = {}
-    for ax, feat in zip(axes, features):
-        c = california_spectral_density(feature=feat, seed=seed)
-        out[feat] = c
-        ax.plot(c["omega"], c["density"], color="#3b6ea5", lw=2.0)
-        ax.fill_between(c["omega"], c["density"], color="#3b6ea5", alpha=0.18)
-        peak = c["omega"][np.argmax(c["density"])]
-        ax.axvline(peak, color="#c44e52", ls="--", lw=1.2, label=f"peak $\\omega$ = {peak:.2f}")
-        kind = "smooth trend (low-frequency mass)" if c["lowfreq_mass"] > 0.5 \
-            else "structure at a scale (peak away from 0)"
-        ax.set_title(f"{feat}: {kind}\nlow-freq mass {c['lowfreq_mass']:.2f}", fontsize=10)
-        ax.set_xlabel("frequency $\\omega$"); ax.set_ylabel("learned spectral density")
-        ax.legend(fontsize=9)
-    fig.suptitle("California: the learned spectral measure per feature is the geometry",
-                 fontsize=11)
-    return fig, out
+    dens = california_spectral_density(features=features, seed=seed)
+    fig, ax = plt.subplots(figsize=(7.6, 4.4), constrained_layout=True)
+    for f, c in zip(features, ["#3b6ea5", "#c44e52"]):
+        D = dens[f]
+        ax.plot(D["freqs"], D["power"], color=c,
+                label=f"{f}: peak ω={D['peak']:.2f}, low-freq mass {D['low_freq_mass']:.0%}")
+    ax.set_title("Per-feature spectral measure on California:\n"
+                 "income is a low-frequency trend; latitude carries scale-specific structure",
+                 fontsize=10)
+    ax.set_xlabel("frequency ω"); ax.set_ylabel("normalized spectral mass"); ax.legend(fontsize=9)
+    return fig
 
 
 # =============================================================================
@@ -523,8 +366,8 @@ def main(argv=None):
     args = p.parse_args(argv)
     set_style()
 
-    print("=" * 72, "\nSPECTRAL-MIXTURE (BOCHNER) KERNEL — smooth + periodic")
     d = periodic_extrapolation_demo()
+    print("=" * 70, "\nSPECTRAL-LAPLACE (finite MS-SKM) — smooth + periodic")
     print(f"  true frequency           {d['true_freq']:.2f}")
     print(f"  recovered peak frequency {d['recovered_freq']:.2f}")
     print(f"  RBF bandwidth (selected) {d['ell']:.3f}")
@@ -532,33 +375,21 @@ def main(argv=None):
     print(f"  extrapolation RMSE  spectral {d['sm_extrap_rmse']:.3f}   RBF {d['rbf_extrap_rmse']:.3f}")
     print("  -> the spectral kernel carries the oscillation beyond the data; the RBF flattens.")
 
-    print("\nROUGHNESS LADDER — the readout sets the order")
     r = roughness_ladder_demo()
-    for name, val in r["rmse"].items():
-        print(f"  {name:32s} fit RMSE {val:.3f}")
+    print(f"\nROUGHNESS LADDER (kinked target): RBF (C-inf) {r['rbf_rmse']:.3f}, "
+          f"Laplace (H^(d+1)/2) {r['laplace_rmse']:.3f} -- the readout sets the order.")
 
-    print("\nCALIFORNIA — learned per-feature spectral density")
-    for feat in ("MedInc", "Latitude"):
-        c = california_spectral_density(feature=feat)
-        peak = c["omega"][np.argmax(c["density"])]
-        print(f"  {feat:9s} peak omega {peak:.2f}, low-freq mass {c['lowfreq_mass']:.2f}, "
-              f"query loss spectral {c['sm_qloss']:.3f} / RBF {c['rbf_qloss']:.3f}")
-
-    print("\nDENSITY PARAMETERIZATION — Gauss-Hermite quadrature (continuity is free)")
-    for G in (4, 8, 16):
-        omega, wts = density_atoms_gauss_hermite(mu_log=0.0, gamma=0.4, G=G)
-        print(f"  G={G:2d} atoms: mass sum {wts.sum():.4f}, mean freq {(omega*wts).sum():.3f} "
-              f"(2 trainable numbers, independent of G)")
+    dens = california_spectral_density()
+    print("\nCALIFORNIA per-feature spectral measure:")
+    for f, D in dens.items():
+        print(f"  {f:10s} peak ω={D['peak']:.2f}, low-frequency mass {D['low_freq_mass']:.0%}")
 
     if args.out_prefix:
         import matplotlib
         matplotlib.use("Agg")
-        # fig 8.1 — the readout sets the roughness order; fig 8.2 — a kernel and its
-        # spectral measure (periodic recovery, plus the California per-feature densities)
         make_roughness_figure().savefig(f"{args.out_prefix}1_roughness.pdf")
         make_periodic_figure().savefig(f"{args.out_prefix}2_spectral_measure.pdf")
-        make_california_density_figure()[0].savefig(f"{args.out_prefix}2_california.pdf")
-        print("\nwrote figures with prefix", args.out_prefix)
+        print("wrote figures with prefix", args.out_prefix)
 
 
 if __name__ == "__main__":
