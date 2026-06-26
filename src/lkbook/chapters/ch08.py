@@ -136,6 +136,23 @@ def _sm_profile_from_lag(T, w, mu, v):
     return (w * np.exp(-2.0 * np.pi ** 2 * T ** 2 * v) * np.cos(2.0 * np.pi * mu * T)).sum(-1)
 
 
+def _dominant_frequency(X, y, mu_max, n_grid=400):
+    """Least-squares periodogram: the frequency whose sinusoid (over a smooth trend) best
+    explains y. Used to seed the spectral fit at the data's true frequency so recovery is
+    reproducible across environments rather than left to optimizer drift."""
+    X = X.ravel(); y = y.ravel()
+    trend = np.vstack([np.ones_like(X), X, X ** 2]).T          # quadratic trend basis
+    r = y - trend @ np.linalg.lstsq(trend, y, rcond=None)[0]    # detrend
+    best_f, best_ss = 0.1, np.inf
+    for f in np.linspace(0.1, mu_max, n_grid):
+        B = np.vstack([np.cos(2 * np.pi * f * X), np.sin(2 * np.pi * f * X)]).T
+        resid = r - B @ np.linalg.lstsq(B, r, rcond=None)[0]
+        ss = float(resid @ resid)
+        if ss < best_ss:
+            best_ss, best_f = ss, float(f)
+    return best_f
+
+
 @_single_thread
 def fit_sm_kernel(Xtr, ytr, Q=4, lam=1e-4, seed=SEED, n_restarts=3, mu_max=4.0):
     """Fit the spectral measure of a Q-component SM kernel by minimizing held-out (query-fold)
@@ -161,14 +178,18 @@ def fit_sm_kernel(Xtr, ytr, Q=4, lam=1e-4, seed=SEED, n_restarts=3, mu_max=4.0):
         pred = _sm_profile_from_lag(Tqs, w, mu, v) @ alpha + ybar
         return float(np.mean((pred - yq) ** 2))
 
+    f_star = _dominant_frequency(Xtr, ytr, mu_max)         # periodogram seed (reproducible)
     best = None
-    for r in range(n_restarts):
-        rs = np.random.RandomState(seed + r)
-        # spread initial frequency means across [0, mu_max]; small bandwidths
-        mu0 = np.linspace(0.05, mu_max, Q) * (0.5 + rs.rand(Q))
-        p0 = np.concatenate([np.zeros(Q),                  # equal weights
-                             np.log(np.clip(mu0, 1e-2, None)),
-                             np.log(0.02 + 0.05 * rs.rand(Q))])
+    for r in range(n_restarts + 1):
+        if r == 0:
+            # seed one low-frequency (trend) atom near DC and one at the data frequency
+            mu0 = np.array([0.05] + [f_star] * (Q - 1)) if Q > 1 else np.array([f_star])
+            lv0 = np.log(np.array([2e-3] + [0.05] * (Q - 1)) if Q > 1 else np.array([0.05]))
+        else:
+            rs = np.random.RandomState(seed + r)
+            mu0 = np.linspace(0.05, mu_max, Q) * (0.5 + rs.rand(Q))   # spread restarts
+            lv0 = np.log(0.02 + 0.05 * rs.rand(Q))
+        p0 = np.concatenate([np.zeros(Q), np.log(np.clip(mu0, 1e-2, None)), lv0])
         res = minimize(query_loss, p0, method="L-BFGS-B",
                        options=dict(maxiter=300, ftol=1e-10, gtol=1e-8))
         if best is None or res.fun < best.fun:
