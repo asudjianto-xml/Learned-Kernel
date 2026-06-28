@@ -36,3 +36,30 @@ def test_california_density_reads_trend_vs_scale():
     dens = ch08.california_spectral_density()
     # income carries more low-frequency (trend) mass than latitude
     assert dens["MedInc"]["low_freq_mass"] > dens["Latitude"]["low_freq_mass"]
+
+
+def test_canonical_kernel_modes_psd_and_unit_diagonal():
+    import numpy as np
+    rng = np.random.RandomState(0); X = rng.uniform(-1, 1, size=(40, 4)); y = X[:, 0] + X[:, 1]
+    for mode in ("estimate", "learned", "constrained"):
+        k, _ = ch08.fit_spectral(X, y, mode=mode, steps=20)   # few steps: this is a structural smoke test
+        K = k.gram(X, X)
+        assert np.allclose(np.diag(K), 1.0)                   # unit diagonal
+        assert np.linalg.eigvalsh(K).min() >= -1e-8           # PSD
+
+
+def test_constrained_mode_extrapolates_like_estimate():
+    # the geometric constraint keeps the periodic atom, so it extrapolates where learned does not
+    import numpy as np
+    rng = np.random.RandomState(0); n = 120; X = np.sort(rng.rand(n))
+    y = 0.8 * (X - 0.5) ** 2 + 0.5 * np.sin(2 * np.pi * 3.0 * X) + 0.05 * rng.randn(n)
+    Xg = np.linspace(0, 2, 400); truth = 0.8 * (Xg - 0.5) ** 2 + 0.5 * np.sin(2 * np.pi * 3.0 * Xg)
+    ex = Xg > 1.0
+
+    def extrap(mode):
+        _, pr = ch08.fit_spectral(X[:, None], y, mode=mode, standardize=False, steps=400)
+        return float(np.sqrt(np.mean((pr(Xg[:, None])[ex] - truth[ex]) ** 2)))
+
+    e, lrn, c = extrap("estimate"), extrap("learned"), extrap("constrained")
+    assert c < lrn - 0.03            # constrained extrapolates markedly better than learned
+    assert c < e + 0.06              # and close to the estimate mode

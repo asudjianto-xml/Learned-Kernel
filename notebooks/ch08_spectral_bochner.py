@@ -186,6 +186,45 @@ interact(explore,
          freq=FloatSlider(min=1.0, max=5.0, step=0.5, value=3.0, description="frequency"));
 
 # %% [markdown]
+# ## 8.6  Three ways to fit the measure
+#
+# The spectral parameters split into the *support* (which frequencies carry mass) and the
+# *geometry* below it (relevances, bandwidths, weights, noise). What we read from the data and
+# what we let the score move defines three modes, with a real tradeoff:
+#
+# - **estimate** — periodogram fixes the support; the score learns only the geometry. Interpretable,
+#   reproducible, **extrapolates** a periodic signal; underfits real multivariate data.
+# - **learned** — every spectral parameter learned by gradient descent on the NLML. Best accuracy on
+#   real data and interactions, **higher variance**, and it does **not** extrapolate (in-hull fitting
+#   drops the periodic atom).
+# - **constrained** — anchor the periodogram atoms (frozen frequency, floored mass) and learn the rest.
+#   The geometric constraint keeps the extrapolating structure while the free capacity gives accuracy.
+#   It gets **both**.
+#
+# We run all three over a few seeds (the book uses ten) on three regimes that separate them.
+
+# %%
+res = ch08.compare_training_modes(seeds=range(3))
+import numpy as _np
+print(f"{'regime':16s}{'estimate':>16s}{'learned':>16s}{'constrained':>16s}")
+for reg in ("periodic", "california", "interaction"):
+    row = "".join(f"{_np.mean(res[reg][m]):.3f}±{_np.std(res[reg][m]):.3f}".rjust(16)
+                  for m in ("estimate", "learned", "constrained"))
+    print(f"{reg:16s}{row}")
+
+# %%
+ch08.make_modes_comparison_figure(res=res)
+plt.show()
+
+# %% [markdown]
+# Read it as a decision. **estimate** when you want an interpretable, reproducible measure or need to
+# extrapolate a periodic signal. **learned** when raw accuracy on real multivariate structure is all
+# that matters (accept the variance and no extrapolation). **constrained** when you want both —
+# extrapolation like estimate, accuracy near learned, and on the interaction even *lower* variance than
+# learned, because the anchor gives the optimizer a stable basin. Chapter 9 runs the learned mode for
+# its tree-vs-spectral head-to-head.
+
+# %% [markdown]
 # ## Exercises
 #
 # Fill in each `# TODO`; the solution is one click away.
