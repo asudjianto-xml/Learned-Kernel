@@ -73,6 +73,66 @@ def load_california(test_size: float = 0.2, seed: int = 0) -> RunningData:
                     "regression", "$100,000", test_size, seed)
 
 
+@dataclass
+class TabularData:
+    """A mixed-type tabular dataset with cyclical features (Bike Sharing). Carries raw numeric
+    features (tree-ready) plus a `cyclical` map naming the periodic columns and their periods, so
+    a spectral channel can Fourier-encode them (sin/cos at the period)."""
+    Xtr_raw: np.ndarray
+    Xte_raw: np.ndarray
+    ytr: np.ndarray
+    yte: np.ndarray
+    names: list[str]
+    cyclical: dict          # {feature_name: period}
+    task: str
+    target_unit: str
+    categorical: list[str] = None   # native-categorical columns (for the CatBoost channel)
+    continuous: list[str] = None    # smooth numeric columns (temp, humidity, windspeed)
+
+    @property
+    def n(self) -> int:
+        return len(self.Xtr_raw)
+
+    @property
+    def d(self) -> int:
+        return self.Xtr_raw.shape[1]
+
+    def col(self, name: str) -> int:
+        return self.names.index(name)
+
+
+def load_bikeshare(test_size: float = 0.2, seed: int = 0) -> TabularData:
+    """Bike Sharing Demand — regression on hourly ride count (UCI; Fanaee-T & Gama 2014).
+
+    A natural fusion example: periodic demand in the cyclical features (hour, month, weekday) is
+    what the Fourier/spectral channel owns, while sharp categorical regimes and their interactions
+    with time (a working-day morning is a commute peak; a weekend morning is not) are what the
+    CatBoost channel owns. Redundant features are dropped — ``season`` (carried by ``month``) and
+    ``feel_temp`` (collinear with ``temp``). The categorical regime features are kept as integer
+    codes (not one-hot) for CatBoost's native categorical handling and named in ``categorical``;
+    the cyclical integers are left raw and named in ``cyclical`` so the spectral channel can
+    Fourier-encode them. The target is ``log1p(count)`` (the count is heavily right-skewed)."""
+    from sklearn.datasets import fetch_openml
+    df = fetch_openml("Bike_Sharing_Demand", version=2, as_frame=True).frame.copy()
+    y = np.log1p(df.pop("count").to_numpy(dtype=float))
+    df.pop("season")            # redundant with month (the cyclical channel already carries it)
+    df.pop("feel_temp")         # nearly collinear with temp
+    for b in ("holiday", "workingday"):
+        df[b] = (df[b].astype(str) == "True").astype(int)
+    # weather and year as integer category codes (native-categorical for CatBoost)
+    df["weather"] = df["weather"].astype(str).astype("category").cat.codes.astype(int)
+    df["year"] = df["year"].astype(int)
+    df = df.astype({"weekday": float, "hour": float, "month": float})
+    cyc = {"hour": 24.0, "month": 12.0, "weekday": 7.0}
+    cont = ["temp", "humidity", "windspeed"]
+    categorical = ["year", "holiday", "workingday", "weather"]
+    order = list(cyc) + categorical + cont
+    X = df[order].to_numpy(dtype=float)
+    Xtr_raw, Xte_raw, ytr, yte = train_test_split(X, y, test_size=test_size, random_state=seed)
+    return TabularData(Xtr_raw, Xte_raw, ytr, yte, order, cyc, "regression", "log rides/hr",
+                       categorical=categorical, continuous=cont)
+
+
 def load_taiwan(test_size: float = 0.2, seed: int = 0) -> RunningData:
     """Taiwan Credit Default — binary classification (1 = default next month)."""
     override = os.environ.get("LKBOOK_TAIWAN_NPZ")

@@ -19,3 +19,6 @@ env/
 # OS / editor
 .DS_Store
 *.swp
+
+# CatBoost training artifacts
+catboost_info/
