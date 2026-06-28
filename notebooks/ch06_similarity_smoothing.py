@@ -14,7 +14,7 @@
 # ---
 
 # %% [markdown]
-# # Chapter 6 — Similarity, smoothing, and case-based prediction
+# # Chapter 6 — Similarity, smoothing and case-based prediction
 #
 # *Companion notebook to **The Learned Kernel**, Ch. 6. Run top to bottom.*
 #
