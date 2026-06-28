@@ -8,15 +8,18 @@ on:
 jobs:
   test-and-run-notebooks:
     runs-on: ubuntu-latest
-    timeout-minutes: 20          # backstop: fail fast instead of hanging
+    timeout-minutes: 45          # backstop: spectral (torch) + CatBoost notebooks are compute-heavy
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip             # cache wheels across runs (torch/catboost are large)
       - name: Install package + notebook/dev extras
         run: |
           python -m pip install --upgrade pip
+          # CPU-only torch first, so the editable install does NOT pull the ~2GB CUDA wheel
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -e ".[notebooks,dev]"
       - name: Register the python3 kernel
         run: python -m ipykernel install --user --name python3
