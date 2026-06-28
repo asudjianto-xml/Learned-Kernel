@@ -140,18 +140,22 @@ class TreeChannel:
 
 class SpectralChannel:
     """The Chapter-8 learned spectral-Laplace kernel (learned mode), itself a *convex fusion of H
-    Laplace banks* at different bandwidths --- k_spectral = sum_h w_h exp(-||phi_h(x)-phi_h(x')||/
-    T_h), w on the H-simplex. Fitting it (stage 1 of the chapter's two-level fusion) learns the
-    bank weights w_h and bandwidths T_h that span the data's scales. Fit on the already-encoded /
-    standardized representation (standardize=False)."""
+    Laplace banks* --- k_spectral = sum_h w_h exp(-||phi_h(x)-phi_h(x')||/T_h), w on the H-simplex.
+    This is stage 1 of the chapter's two-level fusion. The banks are pinned to a *fixed log-spaced
+    grid* of bandwidths spanning fine to coarse (`T_init`, `learn_T=False`), so the multi-bank
+    fusion is a genuine, reproducible spread of *scales*; the convex weights w_h (and the
+    frequencies, amplitudes and ARD relevance) are learned, so the data chooses how much mass each
+    scale carries. Fit on the already-encoded / standardized representation (standardize=False)."""
     name = "spectral"
 
-    def __init__(self, seed=SEED, steps=400, H=3):
+    def __init__(self, seed=SEED, steps=400, H=4, T_lo=0.5, T_hi=12.0):
         self.seed, self.steps, self.H = seed, steps, H
+        self.T_init = np.geomspace(T_lo, T_hi, H)              # fixed multi-scale bank grid
 
     def fit(self, Xs, ys):
         self.kernel, _ = ch08.fit_spectral(Xs, ys, mode="learned", objective="nlml", H=self.H,
-                                           standardize=False, steps=self.steps, seed=self.seed)
+                                           standardize=False, steps=self.steps, seed=self.seed,
+                                           T_init=self.T_init, learn_T=False)
         return self
 
     def block(self, A, B):

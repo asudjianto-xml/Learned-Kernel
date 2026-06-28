@@ -281,9 +281,10 @@ class LearnedSpectralLaplace:
     `interaction="additive"` is Chapter 9's order-one control (sum of per-feature Laplace)."""
 
     def __init__(self, d, H, anchor_omega=None, free_omega=None, anchor_floor=1.0,
-                 interaction="full", seed=SEED, device=None):
+                 interaction="full", seed=SEED, device=None, T_init=None, learn_T=True):
         torch = _torch()
         self.d, self.H, self.interaction, self.anchor_floor = d, H, interaction, anchor_floor
+        self.learn_T = learn_T
         dev = device if device is not None else _device(); self._dev = dev
         g = torch.Generator(device="cpu").manual_seed(seed)
         # anchor atoms: frozen frequency, amplitude = floor + softplus(0) (fixed, never optimized away)
@@ -305,7 +306,11 @@ class LearnedSpectralLaplace:
         else:
             self.Kf, self.log_omf, self.log_ampf = 0, None, None
         self.log_s = torch.zeros(d, device=dev, dtype=_DTYPE).requires_grad_(True)    # ARD relevance
-        self.log_T = torch.zeros(H, device=dev, dtype=_DTYPE).requires_grad_(True)
+        if T_init is not None:                                                        # banks spread across scales
+            t0 = torch.as_tensor(np.expm1(np.asarray(T_init, float)), dtype=_DTYPE).clamp_min(1e-4).log()
+            self.log_T = t0.to(dev, _DTYPE).requires_grad_(learn_T)                   # softplus^{-1}(T_init)
+        else:
+            self.log_T = torch.zeros(H, device=dev, dtype=_DTYPE).requires_grad_(learn_T)
         self.w_logit = torch.zeros(H, device=dev, dtype=_DTYPE).requires_grad_(True)
         self.log_sig2 = torch.tensor(np.log(0.1), device=dev, dtype=_DTYPE).requires_grad_(True)
 
@@ -313,7 +318,10 @@ class LearnedSpectralLaplace:
         return [self.log_omf, self.log_ampf] if self.Kf else []
 
     def geometry_params(self):
-        return [self.log_s, self.log_T, self.w_logit, self.log_sig2]
+        ps = [self.log_s, self.w_logit, self.log_sig2]
+        if self.learn_T:                                          # frozen banks (learn_T=False) keep fixed T_h
+            ps.append(self.log_T)
+        return ps
 
     def _om_amp(self):
         torch = _torch(); F = torch.nn.functional
@@ -368,7 +376,8 @@ class LearnedSpectralLaplace:
 
 @_single_thread
 def fit_spectral(Xtr, ytr, mode="learned", objective="nlml", H=2, K=8, steps=500, lr=0.05,
-                 seed=SEED, interaction="full", n_fit=1200, standardize=True):
+                 seed=SEED, interaction="full", n_fit=1200, standardize=True,
+                 T_init=None, learn_T=True):
     """Fit the canonical learned spectral-Laplace kernel in one of the three training modes
     (`mode="estimate"`, `"learned"` or `"constrained"`; see the section header). `objective`
     is `"nlml"` (the Chapter-5 marginal likelihood, skm's default) or `"query"` (the Chapter-7
@@ -396,7 +405,8 @@ def fit_spectral(Xtr, ytr, mode="learned", objective="nlml", H=2, K=8, steps=500
     else:                                                    # learned: free only
         om0, _ = _seed_support(Xn, ytr, K)
         ker = LearnedSpectralLaplace(d, H, anchor_omega=None, free_omega=om0,
-                                     interaction=interaction, seed=seed, device=dev)
+                                     interaction=interaction, seed=seed, device=dev,
+                                     T_init=T_init, learn_T=learn_T)
 
     groups = [{"params": ker.geometry_params(), "lr": lr}]
     if ker.Kf:                                               # free frequencies refine at a smaller LR
