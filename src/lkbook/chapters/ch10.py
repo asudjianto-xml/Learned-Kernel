@@ -509,6 +509,56 @@ def vertex_sweep(ts=(0.0, 0.25, 0.5, 0.75, 1.0), seed=SEED, n_fit=1200):
 
 
 # =============================================================================
+# Fusion as variance reduction: fusing independent tree refits stabilizes the
+# leaf kernel (the fuse-kernel "fusion reduces partition variance" result)
+# =============================================================================
+
+def partition_variance_reduction(B=16, n_train=1200, n_eval=400, m_grid=(1, 2, 4, 8), seed=SEED):
+    """A *third* level of fusion: across independent refits. Boosting partitions are unstable ---
+    refit under a different seed/bootstrap and the leaf kernel on a fixed evaluation set moves.
+    Fusing B independent refits is bagging in kernel space: the across-refit variance of the
+    m-fused kernel falls as ~1/m (Prop. 'fusion reduces partition variance'), and the uniform
+    limit is the random-forest proximity kernel. We refit the tuned CatBoost leaf kernel B times
+    under independent seeds + bootstraps, build each on a fixed eval set, and measure the relative
+    squared-Frobenius variance of an m-average as a function of m, returning the log-log slope
+    (predicted -1 for independent refits)."""
+    from catboost import CatBoostRegressor, Pool
+    d = load_bikeshare()
+    rng = np.random.RandomState(seed)
+    idx = rng.choice(d.n, min(n_train, d.n), replace=False)
+    Xtr, ytr = d.Xtr_raw[idx], d.ytr[idx].astype(float)
+    Xev = d.Xte_raw[:n_eval]
+    Ks = []
+    for b in range(B):
+        boot = np.random.RandomState(1000 + b).choice(len(ytr), len(ytr), replace=True)
+        mdl = CatBoostRegressor(depth=6, iterations=400, learning_rate=0.1, loss_function="RMSE",
+                                random_seed=b, verbose=0, allow_writing_files=False, thread_count=-1)
+        mdl.fit(Xtr[boot], ytr[boot])
+        L = mdl.calc_leaf_indexes(Pool(Xev)); T = L.shape[1]
+        K = np.zeros((n_eval, n_eval))
+        for t in range(T):
+            K += (L[:, t][:, None] == L[:, t][None, :])
+        Ks.append(K / T)
+    Ks = np.asarray(Ks)
+    rows = []
+    for m in m_grid:
+        if 2 * m > B:
+            continue
+        diffs = []
+        for r in range(20):
+            perm = np.random.RandomState(r).permutation(B)
+            A = Ks[perm[:m]].mean(0); Bk = Ks[perm[m:2 * m]].mean(0)
+            ref = 0.5 * (A + Bk)
+            diffs.append(float(np.sum((A - Bk) ** 2) / (np.sum(ref ** 2) + 1e-12)))
+        rows.append((int(m), float(np.mean(diffs))))
+    ms = np.array([r[0] for r in rows], float); v = np.array([r[1] for r in rows], float)
+    slope = float(np.polyfit(np.log(ms), np.log(v), 1)[0])
+    reduction = float(rows[0][1] / rows[-1][1]) if len(rows) > 1 else 1.0
+    return {"m_grid": [r[0] for r in rows], "rel_var": [r[1] for r in rows],
+            "slope": slope, "reduction": reduction}
+
+
+# =============================================================================
 # Figures
 # =============================================================================
 

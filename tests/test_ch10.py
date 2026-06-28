@@ -74,6 +74,13 @@ def test_earned_weight_tracks_geometry():
     assert wh["tree"] >= wh["spectral"]                         # sharp target favors the tree
 
 
+def test_partition_variance_reduction_falls_with_m():
+    # fusing independent tree refits reduces the across-refit kernel variance (~1/m); small + fast
+    out = ch10.partition_variance_reduction(B=4, n_train=300, n_eval=120, m_grid=(1, 2))
+    assert out["rel_var"][-1] < out["rel_var"][0]      # variance falls as more refits are fused
+    assert out["slope"] < 0                            # log-log slope is negative (toward -1)
+
+
 def test_figures_build():
     import matplotlib
     matplotlib.use("Agg")
