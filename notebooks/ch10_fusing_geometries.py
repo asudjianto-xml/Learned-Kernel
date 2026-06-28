@@ -162,36 +162,42 @@ for tau, gap in fid:
     print(f"  tau = {tau:4d}   ||K_soft - K_hard||_F / ||K_hard||_F = {gap:.4f}")
 
 # %% [markdown]
-# ## 10.7  Explore: the earned weight tracks the target's geometry
+# ## 10.7  Explore: decompose any held-out hour
 #
-# Drive a synthetic target from smooth/periodic (t = 0) to a deep axis-aligned partition (t = 1,
-# the geometry the tree owns) and refit the fusion at each step. Nobody sets the weights — the
-# query fold does. Watch the selected vertex slide from spectral to tree.
+# The fusion is fit once, at the leakage-free setting selected in §10.1, and the exact additive
+# decomposition then explains every prediction with no refitting. Pick a held-out Bike-Sharing
+# hour and read its prediction as intercept + tree + spectral. (The book also sweeps a synthetic
+# target from smooth to sharp to show the earned weight tracking the geometry; that sweep refits
+# the fusion many times, so it is left to `lkbook.chapters.ch10.vertex_sweep` rather than run here.)
 
 # %%
-sweep = ch10.vertex_sweep(ts=(0.0, 0.25, 0.5, 0.75, 1.0), n_fit=900)
-tbl = pd.DataFrame(sweep)[["t", "spectral", "tree"]].round(2)
-tbl
+from ipywidgets import interact, IntSlider
+from lkbook import load_bikeshare
 
-# %%
-from ipywidgets import interact, FloatSlider
-
-_by_t = {round(r["t"], 2): r for r in sweep}
+d = load_bikeshare()
+_, reps_te, _ = ch10._bike_reps(d)
 
 
-def show_weights(t=0.0):
-    r = _by_t[round(t, 2)]
-    fig, ax = plt.subplots(figsize=(5.2, 4.0), constrained_layout=True)
-    ax.bar(["spectral", "tree"], [r["spectral"], r["tree"]],
-           color=[ch10.SPECTRAL_C, ch10.TREE_C])
-    ax.set_ylim(0, 1.02); ax.set_ylabel("earned simplex weight")
-    ax.set_title(f"target morph t = {t:.2f}\n(0 = smooth/periodic → 1 = sharp partition)",
-                 fontsize=11)
+def decompose_hour(i=0):
+    reps_i = {nm: reps_te[nm][i:i + 1] for nm in fm.names}
+    contribs, intercept = fm.channel_contributions(reps_i)
+    parts = {c: float(np.atleast_1d(v)[0]) for c, v in contribs.items()}
+    pred = float(fm.predict(reps_i)[0])
+    fig, ax = plt.subplots(figsize=(6.0, 4.0), constrained_layout=True)
+    labels = ["intercept"] + list(parts) + ["= prediction"]
+    running = intercept
+    ax.bar(0, intercept, 0.7, color="#999999")
+    for k, (c, v) in enumerate(parts.items(), 1):
+        ax.bar(k, v, 0.7, bottom=running, color=ch10.TREE_C if c == "tree" else ch10.SPECTRAL_C)
+        running += v
+    ax.bar(len(parts) + 1, pred, 0.7, color="#222222")
+    ax.set_xticks(range(len(labels))); ax.set_xticklabels(labels, fontsize=8, rotation=15)
+    ax.axhline(0, color="k", lw=0.6); ax.set_ylabel("log rides/hr")
+    ax.set_title(f"held-out hour {i}: intercept + tree + spectral = {pred:.3f}", fontsize=10)
     plt.show()
 
 
-interact(show_weights, t=FloatSlider(min=0.0, max=1.0, step=0.25, value=0.0,
-                                     description="morph t"));
+interact(decompose_hour, i=IntSlider(min=0, max=499, step=1, value=0, description="hour"));
 
 # %% [markdown]
 # ## Exercises

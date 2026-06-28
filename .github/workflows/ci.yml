@@ -8,7 +8,7 @@ on:
 jobs:
   test-and-run-notebooks:
     runs-on: ubuntu-latest
-    timeout-minutes: 45          # backstop: spectral (torch) + CatBoost notebooks are compute-heavy
+    timeout-minutes: 75          # backstop: spectral (torch) + CatBoost notebooks are compute-heavy on the 2-CPU runner
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,6 +28,6 @@ jobs:
       - name: Execute every chapter notebook
         run: |
           jupyter nbconvert --to notebook --execute --inplace \
-            --ExecutePreprocessor.timeout=300 \
+            --ExecutePreprocessor.timeout=900 \
             --ExecutePreprocessor.kernel_name=python3 \
             notebooks/*.ipynb
