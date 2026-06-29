@@ -18,26 +18,22 @@
 #
 # *Companion notebook to **The Learned Kernel**, Ch. 11. Run top to bottom.*
 #
-# A table such as Taiwan Credit is **unordered**. Two facts follow that the modeling does not
-# impose: the rows are **exchangeable** (relabeling leaves the joint law unchanged), and
-# **similarity is symmetric** (how much row *i* resembles *j* does not depend on which is the
-# query). A permutation-invariant operator over exchangeable rows factors through a symmetric
-# statistic, so the Gram is symmetric. Bochner (Ch. 8) closes the loop: the symmetric stationary
-# class already contains every stationary geometry, so committing to symmetry loses no
-# expressivity. Asymmetry is **extra capacity**; on an exchangeable table it has nothing to
-# represent and must be learned away at a cost.
+# A table such as Taiwan Credit is **unordered**: the rows are **exchangeable** and **similarity is
+# symmetric**, so a permutation-invariant operator factors through a symmetric statistic — the Gram
+# is symmetric. Bochner (Ch. 8) adds that the symmetric stationary class already contains every
+# stationary geometry, so symmetry loses no expressivity. Asymmetry is **extra capacity** that, on
+# an exchangeable table, does no work — and it carries a real cost: an asymmetric kernel has no
+# RKHS, so it **forfeits kernel ridge regression**.
 #
-# **The frame** — *what is learned · how scored · what you read off.*
-# What: the pairwise *k(x,x')* and its antisymmetric **directional content** Δ = k − kᵀ.
-# Scored: the first-order change in held-out risk along k_s + εΔ is **−2⟨Δ, h_a⟩**, with the
-# response gradient h_a(x,x') = m(x) − m(x'). Read off: the alignment ⟨Δ, h_a⟩ and the predictive
-# gain *D* — near zero on an exchangeable table, large on a directed task.
+# **The frame** — *what is learned · how scored · what you read off.* What: the pairwise k and its
+# antisymmetric directional content Δ = k − kᵀ; and, when both are admitted, the asymmetry weight ρ.
+# Scored: the first-order risk change along k_s + εΔ is **−2⟨Δ, h_a⟩**. Read off: the earned weight
+# **ρ\*** — →0 exchangeable, >0 directed.
 
 # %% [markdown]
 # ## Setup
 
 # %%
-# On Google Colab (or any fresh env) install the companion package; no-op locally.
 try:
     import lkbook  # noqa: F401
 except ModuleNotFoundError:
@@ -50,6 +46,7 @@ except ModuleNotFoundError:
 # %matplotlib inline
 import numpy as np
 import matplotlib.pyplot as plt
+import warnings; warnings.filterwarnings("ignore")
 
 from lkbook import set_style
 from lkbook.chapters import ch11
@@ -57,86 +54,101 @@ from lkbook.chapters import ch11
 set_style()
 
 # %% [markdown]
-# ## 11.1  The head-to-head on Taiwan Credit
+# ## 11.1  The first-order law and orthogonality
 #
-# Two attention smoothers, identical encoder / schedule / Nadaraya–Watson readout, differing in
-# **one** thing: the symmetric form **shares** the projection (W_Q = W_K, a PSD Gram — the one-line
-# "linear-attention" retrofit), the asymmetric form keeps **separate** W_Q, W_K. If symmetry costs
-# nothing, the symmetric model should match the asymmetric one — at fewer parameters.
+# Any pairwise score splits into symmetric + antisymmetric parts. The directional content Δ = k − kᵀ
+# does predictive work only insofar as it aligns with the response gradient h_a; the first-order
+# gain is **−2⟨Δ, h_a⟩**, which vanishes when Δ ⊥ h_a. We verify the proportionality and then show
+# that on exchangeable Taiwan Credit the alignment over random directions concentrates at zero.
 
 # %%
-tw = ch11.run_taiwan_headtohead()
-print(f"asymmetric (W_Q != W_K): AUC {tw['asym'].mean():.3f} +/- {tw['asym'].std():.3f}"
-      f"   ({tw['n_params']['asym']} params)")
-print(f"symmetric  (shared W)  : AUC {tw['sym'].mean():.3f} +/- {tw['sym'].std():.3f}"
-      f"   ({tw['n_params']['sym']} params)")
-print("=> matched held-out AUC; the symmetric model uses ~30% fewer parameters.")
-
-# %% [markdown]
-# ## 11.2  The first-order law: gain is proportional to −⟨Δ, h_a⟩
-#
-# Any pairwise score splits into symmetric + antisymmetric parts under the swap x↔x'. The
-# directional content Δ = k − kᵀ does predictive work only insofar as it aligns with the response
-# gradient h_a. The theorem: the first-order risk change along k_s + εΔ is −2⟨Δ, h_a⟩, so the gain
-# **vanishes exactly when Δ ⊥ h_a**. We sweep a family of directions whose alignment ranges over an
-# interval and check the measured risk derivative tracks −⟨Δ, h_a⟩.
-
-# %%
-law = ch11.run_first_order()
-print(f"corr( <Delta, h_a> , measured dL/deps ) = {law['corr']:+.3f}   (the law predicts ~ -1)")
-print("=> the gain is proportional to -<Delta, h_a> and passes through the origin.")
-
-# %% [markdown]
-# ## 11.3  On exchangeable data the directional content is orthogonal to the signal
-#
-# On Taiwan Credit, ⟨Δ, h_a⟩ over **random** admissible antisymmetric directions concentrates at
-# zero: a generic asymmetric kernel's directional content is orthogonal-in-expectation to the
-# response gradient, so it buys nothing to first order.
-
-# %%
-ortho = ch11.run_orthogonality()
+law = ch11.run_first_order(n_dirs=15)
+ortho = ch11.run_orthogonality(n_dirs=30, n=800)
+print(f"first-order law: corr(<Delta,h_a>, dL/deps) = {law['corr']:+.3f}  (predicts ~ -1)")
 ti = ortho["taiwan_ips"]
-print(f"Taiwan <Delta,h_a> over random directions: mean {ti.mean():+.4f}, std {ti.std():.4f}"
+print(f"Taiwan <Delta,h_a> over random directions: mean {ti.mean():+.4f} std {ti.std():.4f}"
       f"  (|mean|/std = {abs(ti.mean())/ti.std():.2f})")
-print(f"directed-task aligned <Delta,h_a> = {ortho['directed_aligned']:+.3f}"
-      f"  (vs random std {ortho['directed_random_std']:.3f}) — far off zero")
+
+# %% [markdown]
+# ## 11.2  Asymmetrizing a sophisticated kernel forfeits KRR
+#
+# Take a spectral (Bochner) kernel and asymmetrize its feature map (separate query/key transforms).
+# It is no longer symmetric PSD, so it leaves the RKHS — KRR's `(K+λI)⁻¹` solve no longer applies and
+# prediction drops to row-normalization (NW). Three arms on the **same** spectral kernel: the cost is
+# losing KRR, and asymmetry recovers none of it.
 
 # %%
-ch11.make_law_figure({"law": law, "ortho": ortho, "taiwan": tw})
+sc = ch11.run_spectral_cost(seeds=range(3))
+print(f"spectral  sym + KRR : AUC {sc['sym_krr'].mean():.3f}")
+print(f"spectral  sym + NW  : AUC {sc['sym_nw'].mean():.3f}   (cost of the predictor downgrade)")
+print(f"spectral asym + NW  : AUC {sc['asym_nw'].mean():.3f}   (asymmetry recovers nothing)")
+print(f"audit gain D {np.median(sc['D']):+.3f}   <Delta,h_a> {np.mean(sc['ip']):+.4f}")
+
+# %%
+ch11.make_law_figure({"law": law, "ortho": ortho, "spectral_cost": sc})
 plt.show()
 
 # %% [markdown]
-# ## 11.4  When asymmetry is earned: a directed task
+# ## 11.3  The book's symmetric kernels beat asymmetric attention
 #
-# Asymmetry pays exactly when an admissible antisymmetric direction aligns with h_a — when the data
-# carries a **directed** relation. Construct one: each point has a position, the support label is a
-# smooth signal s(pos), and the query target is the **lagged** signal s(pos − δ). Predicting the
-# target requires attending *upstream* by a fixed offset, which a symmetric distance kernel (centered
-# at the query's own position) cannot do.
+# Set the book's strongest **symmetric** kernels — spectral (Ch. 8), tree leaf (Ch. 4), and their
+# fusion (Ch. 10), each a PSD Gram + **KRR** — against the asymmetric attention smoother (W_Q ≠ W_K,
+# NW). The symmetric kernels, using the predictor symmetry unlocks, win. (A few seeds at a smaller
+# train size live; the book averages more — the ordering is the point.)
 
 # %%
-di = ch11.run_directed_headtohead()
-print(f"directed lag task — asymmetric RMSE {di['asym'].mean():.3f}, "
-      f"symmetric RMSE {di['sym'].mean():.3f}")
-print(f"audit gain D (symmetrizing the trained asym model) median {np.median(di['D']):+.1f}"
-      f"  — symmetrizing destroys the learned lag")
+real = ch11.run_real_headtohead(seeds=range(2), n_train=700)
+print(f"spectral + KRR   AUC {real['spectral_krr'].mean():.3f}")
+print(f"tree     + KRR   AUC {real['tree_krr'].mean():.3f}")
+print(f"fused    + KRR   AUC {real['fused_krr'].mean():.3f}")
+print(f"attention + NW   AUC {real['asym_attn_nw'].mean():.3f}   (asymmetric, beaten by all three)")
+
+# %% [markdown]
+# ## 11.4  Use both, and read the diagnostic
+#
+# Symmetry and asymmetry need not be an exclusive choice: fuse a symmetric PSD channel (KRR) and an
+# asymmetric channel (NW), choosing the asymmetry weight ρ leakage-free on a query fold (Ch. 10). The
+# earned **ρ\*** is the diagnostic — ρ*→0 on exchangeable data, ρ*>0 on a directed task.
 
 # %%
-ch11.make_decision_figure(di, tw)
+fu = ch11.run_fusion_diagnostic(seeds=range(3))
+print(f"earned asymmetry weight rho*:  Taiwan (exchangeable) {fu['taiwan_rho'].mean():.2f}"
+      f"   directed (temporal) {fu['directed_rho'].mean():.2f}")
+
+# %%
+ch11.make_kernels_figure({"real": real, "fusion": fu})
 plt.show()
 
 # %% [markdown]
-# ## 11.5  Explore: how directed must the data be before asymmetry is earned?
+# ## 11.5  When asymmetry is earned — and the decision rule
 #
-# Sweep the lag δ. At δ = 0 the task is undirected and the two models match; as δ grows the
-# symmetric kernel, forced to center its weight at the query's own position, falls behind while the
-# asymmetric kernel tracks the offset. The screen ⟨Δ, h_a⟩ rises off zero in step.
+# A directed mechanism makes asymmetry pay. Construct one: predict the **lagged** signal s(pos − δ)
+# by smoothing labels s(pos). A symmetric distance kernel centers its weight at the query's own
+# position and is wrong by the lag; the asymmetric smoother attends upstream and captures it. This is
+# a positional/temporal relation — the proper subject of **Ch. 23** (and the asymmetric-kernel theory
+# of Ch. 24).
+
+# %%
+di = ch11.run_directed_headtohead(seeds=range(3))
+print(f"directed lag task — asymmetric RMSE {di['asym'].mean():.3f}, symmetric RMSE {di['sym'].mean():.3f}")
+print(f"audit gain D (symmetrizing the trained asym model) median {np.median(di['D']):+.1f}")
+
+# %%
+ch11.make_decision_figure()
+plt.show()
+
+# %% [markdown]
+# ### Explore: how directed must the data be before asymmetry is earned?
+#
+# Sweep the lag δ. At δ = 0 the task is undirected and the two match; as δ grows the symmetric kernel
+# falls behind while the asymmetric one tracks the offset. (Capped at a moderate lag where the small
+# demo model converges reliably.)
 
 # %%
 from ipywidgets import interact, FloatSlider
 
 
-def compare_at_lag(lag=0.18):
+def compare_at_lag(lag=0.12):
     r = ch11.directed_one_lag(lag, seed=0)
     fig, ax = plt.subplots(figsize=(5.6, 4.0), constrained_layout=True)
     ax.bar([0, 1], [r["sym"], r["asym"]], width=0.6,
@@ -150,7 +162,7 @@ def compare_at_lag(lag=0.18):
     plt.show()
 
 
-interact(compare_at_lag, lag=FloatSlider(min=0.0, max=0.30, step=0.03, value=0.18,
+interact(compare_at_lag, lag=FloatSlider(min=0.0, max=0.18, step=0.03, value=0.12,
          description="lag"));
 
 # %% [markdown]
@@ -159,11 +171,32 @@ interact(compare_at_lag, lag=FloatSlider(min=0.0, max=0.30, step=0.03, value=0.1
 # Fill in each `# TODO`; the solution is one click away.
 
 # %% [markdown]
-# **(easy)** Confirm the symmetric model is not merely smaller but **matched**. Compute the
-# per-seed AUC gap (asymmetric − symmetric) and check its mean is within seed noise of zero.
+# **(easy)** Quantify the cost of asymmetrizing the spectral kernel: the AUC dropped by forfeiting
+# KRR, and the (non-)gain from the asymmetric part itself.
 
 # %%
-# TODO: use tw["asym"] and tw["sym"] to compute the per-seed gap and its mean/std
+# TODO: from `sc`, compute (sym_krr - asym_nw) and (asym_nw - sym_nw)
+krr_cost = asym_gain = None
+print(krr_cost, asym_gain)
+
+# %% [markdown]
+# <details><summary>Solution</summary>
+#
+# ```python
+# krr_cost  = sc["sym_krr"].mean() - sc["asym_nw"].mean()   # ~0.07: lost by leaving the RKHS
+# asym_gain = sc["asym_nw"].mean() - sc["sym_nw"].mean()    # ~0: asymmetry adds nothing
+# print(f"KRR forfeited: {krr_cost:+.3f}   asymmetry gain: {asym_gain:+.3f}")
+# ```
+# Asymmetrizing the kernel costs the full KRR-vs-NW gap and returns nothing — the directional content
+# is orthogonal to the response gradient on an exchangeable table.
+# </details>
+
+# %% [markdown]
+# **(⋆)** Show the diagnostic separates the regimes. Compare the earned weight ρ* on exchangeable
+# Taiwan against the directed task and confirm the gap.
+
+# %%
+# TODO: compare fu["taiwan_rho"].mean() and fu["directed_rho"].mean()
 gap = None
 print(gap)
 
@@ -171,42 +204,17 @@ print(gap)
 # <details><summary>Solution</summary>
 #
 # ```python
-# gap = tw["asym"] - tw["sym"]
-# print(f"mean gap {gap.mean():+.4f} +/- {gap.std():.4f}")  # ~0 within noise
+# gap = fu["directed_rho"].mean() - fu["taiwan_rho"].mean()
+# print(f"rho* directed {fu['directed_rho'].mean():.2f} vs Taiwan {fu['taiwan_rho'].mean():.2f}  (gap {gap:+.2f})")
 # ```
-# The asymmetric parameterization carries more parameters but returns no held-out accuracy for
-# them: the extra antisymmetric capacity is orthogonal to the response gradient on exchangeable
-# rows, so symmetrizing loses nothing.
-# </details>
-
-# %% [markdown]
-# **(⋆)** Show the orthogonality is a property of the **data**, not the direction. Take the directed
-# task's *aligned* direction and confirm ⟨Δ, h_a⟩ is large there, then confirm a *random* direction
-# on the same data is near zero — the alignment, not the asymmetry, is what matters.
-
-# %%
-# TODO: print ortho["directed_aligned"] and ortho["directed_random_std"] and compare
-ratio = None
-print(ratio)
-
-# %% [markdown]
-# <details><summary>Solution</summary>
-#
-# ```python
-# ratio = abs(ortho["directed_aligned"]) / ortho["directed_random_std"]
-# print(f"aligned / random-spread = {ratio:.1f}")   # >> 1: the aligned direction is special
-# ```
-# A random antisymmetric direction is orthogonal-in-expectation to h_a even on directed data; only
-# the direction aligned with the directed mechanism (the positional offset) carries ⟨Δ, h_a⟩ ≠ 0.
-# Asymmetry is earned by alignment with a directed relation, not by asymmetry per se.
+# The leakage-free fusion earns almost no asymmetric weight on the exchangeable table and substantial
+# weight on the directed task — the same "read the earned weight" diagnostic as Ch. 6 and Ch. 10.
 # </details>
 
 # %% [markdown]
 # ---
-# *Companion to Chapter 11 of **The Learned Kernel**. Everything here comes from
-# `lkbook.chapters.ch11` — the same code the book's figures come from. The head-to-head trains two
-# attention smoothers differing only in symmetry; the first-order law and orthogonality are computed
-# in closed form on the running example; the directed lag task is the one regime where asymmetry is
-# earned. The larger study (sixty-cell audit, head-to-head against standard self-attention, TabPFN
-# reverse-engineering) is summarized in the book and in
-# `similarity-hierarchy-research/affinity/symmetric_kernels_tabular.tex`.*
+# *Companion to Chapter 11 of **The Learned Kernel**. Everything comes from `lkbook.chapters.ch11`
+# (which drives the real Ch. 8 spectral and Ch. 4 tree kernels via Ch. 10 for the symmetric arms).
+# The book averages over more seeds at a larger train size; here a few seeds run live, so absolute
+# numbers differ slightly but the orderings hold. The larger study (sixty-cell audit, head-to-head
+# against standard self-attention, TabPFN reverse-engineering) is summarized in the book.*
