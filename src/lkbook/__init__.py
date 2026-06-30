@@ -7,7 +7,7 @@ the notebook numbers and figures match the printed book exactly.
 from .data import RunningData, TabularData, load_california, load_taiwan, load_bikeshare
 from .plotting import set_style, SIGNED_CMAP, POS_CMAP
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 __all__ = [
     "RunningData", "TabularData", "load_california", "load_taiwan", "load_bikeshare",
     "set_style", "SIGNED_CMAP", "POS_CMAP", "__version__",
