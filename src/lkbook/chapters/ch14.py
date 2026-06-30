@@ -18,7 +18,13 @@ This module builds on Chapters 12-13 (it imports the prior, kernel and emitter f
     (reuses ``ch12.ceiling_incontext_real``);
   * ``geometry_lever`` -- frozen vs *trained* shared geometry W: training W overfits the prior and
     collapses transfer; a fixed random W is the better inductive bias;
-  * ``read_relevances`` -- the emitted ARD relevances on a real context (the readable diagnostic).
+  * ``read_relevances`` -- the emitted ARD relevances on a real context (the readable diagnostic);
+  * **designing the prior** (the route to interactions, re-exported from ``ch14_priors``):
+    ``run_designing_prior`` builds the prior as a generative simulator fit to the data
+    (``make_arf_sampler``, ``CopulaAdvGenerator``, ``MCMCAdvGenerator``), meta-trains the same
+    width-8 emitter on the synthetic tables (``train_on_generator``) and evaluates zero-shot on real
+    California (``eval_ca_zeroshot``); ``ceiling_lift`` decomposes the residual with the architecture
+    levers (context, trained W, head count). ``make_designing_figure`` draws the result.
 
     python -m lkbook.chapters.ch14 --out-prefix fig14
 """
@@ -32,6 +38,17 @@ import numpy as np
 from lkbook.chapters import ch12
 from lkbook.chapters.ch12 import (MetaMSSKM, sample_measure_prior, sample_gp_tasks, binarize,
                                   bayes_posterior, _pad, _device)
+
+# Designing the prior (the route to interactions). Implementation lives in ch14_priors; re-exported
+# here so the chapter, its notebook and regen_figures import a single surface (``ch14.*``) and never
+# re-implement. ch14_priors.run_all is exposed as run_designing_prior to avoid clashing with ch14's
+# own run_all.
+from lkbook.chapters.ch14_priors import (  # noqa: E402,F401
+    run_all as run_designing_prior,
+    make_designing_figure,
+    make_arf_sampler, CopulaAdvGenerator, MCMCAdvGenerator,
+    train_gp_prior, train_on_generator, eval_ca_zeroshot, ceiling_lift, learnability, load_ca8,
+)
 
 SEED = 0
 

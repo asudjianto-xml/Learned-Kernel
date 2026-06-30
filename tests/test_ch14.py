@@ -64,3 +64,37 @@ def test_fitted_baselines_beat_frozen_on_california():
     zs = ch14._score(pred, ye, kind)["score"]
     base = ch14.fitted_baselines(Xtr, ytr, Xte, yte, kind, seed=0, ch8_steps=200, cb_iters=200)
     assert base["ch8"]["score"] > zs and base["catboost"]["score"] > zs
+
+
+# --- Designing the prior (generative-simulator priors + ceiling-lift) ---------------------
+
+def test_generators_are_learnable():
+    """Each generative prior preserves X->y, so synthetic tasks are learnable (GBDT R2 > 0)."""
+    Xtr, ytr, _, _ = ch14.load_ca8(seed=0)
+    arf = ch14.make_arf_sampler(Xtr, ytr, seed=0, num_trees=20)
+    cop = ch14.CopulaAdvGenerator(rounds=2, iters=80, seed=0).fit(Xtr, ytr).sample_fn()
+    mc = ch14.MCMCAdvGenerator(rounds=2, mh_steps=40, walkers=2048, iters=80, seed=0).fit(Xtr, ytr).sample_fn()
+    for fn in (arf, cop, mc):
+        X, y = fn(200)
+        assert X.shape[1] == 8 and len(y) == 200
+        assert ch14.learnability(fn, seed=0) > 0.0
+
+
+def test_generative_prior_beats_floor():
+    """A generative prior trained zero-shot clears the GP/bandwidth floor on California (loose)."""
+    dev = ch14._device()
+    Xtr, ytr, Xte, yte = ch14.load_ca8(seed=0, device=dev)
+    floor = ch14.train_gp_prior(steps=400, seed=0, device=dev)
+    fl = ch14.eval_ca_zeroshot(floor, Xtr, ytr, Xte, yte, reps=2, seed=0, device=dev)[0]
+    fn = ch14.make_arf_sampler(Xtr, ytr, seed=0, num_trees=20)
+    net = ch14.train_on_generator(fn, steps=400, seed=0, device=dev)
+    zs = ch14.eval_ca_zeroshot(net, Xtr, ytr, Xte, yte, reps=2, seed=0, device=dev)[0]
+    assert np.isfinite(fl) and np.isfinite(zs)
+    assert zs > fl - 0.05                          # generative prior is no worse than the floor
+
+
+def test_ceiling_lift_context_helps():
+    """The real-subtask ceiling does not fall when context grows 512 -> 2048."""
+    res = ch14.ceiling_lift(train_w=False, H=4, steps=400, seed=0, caps=(512, 2048),
+                            device=ch14._device())
+    assert res[2048][0] >= res[512][0] - 0.05

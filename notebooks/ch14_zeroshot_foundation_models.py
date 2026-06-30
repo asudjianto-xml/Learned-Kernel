@@ -127,6 +127,38 @@ ax.set_ylabel("emitted ARD relevance"); ax.set_title("California: the emitted ge
 plt.show()
 
 # %% [markdown]
+# ## 14.4  Designing the prior
+#
+# The probe turned "it trails on California" into "the prior lacks interactions." That is a fixable,
+# real-data-free objective: build the prior as a **generative simulator fit to the data**, so the
+# synthetic tasks carry interactions by construction, then meta-train the *same* width-8 emitter on
+# them and score zero-shot on the real test split. `ch14.run_designing_prior` does this for three
+# generators of rising fidelity — an adversarial random forest, a copula-proposal discriminator
+# sampler and a Metropolis–Hastings sampler — and then runs the ceiling-lift that decomposes the
+# residual (context, trained `W`, head count). *(The book figure uses `steps=3000`; here we halve it
+# for a faster live run — the pattern is the same.)*
+
+# %%
+res = ch14.run_designing_prior(seed=1, steps=1500, device=device)
+fig = ch14.make_designing_figure(res)
+plt.show()
+gp = {g: round(res["gens"][g]["zs512"][0], 3) for g in res["gens"]}
+print("floor", round(res["floor"][0], 3), "| generative-prior zero-shot (cap 512):", gp)
+print("ceiling frozen-W  512:", round(res["ceiling"]["frozenW"][512][0], 3),
+      " 2048:", round(res["ceiling"]["frozenW"][2048][0], 3),
+      "| CatBoost", round(res["catboost"], 3))
+
+# %% [markdown]
+# Two readings. **(left)** Across the three generators the synthetic-task *learnability* climbs while
+# the zero-shot R² barely moves — transfer is **fidelity-saturated**: once the prior carries
+# interactions at all, a more faithful generator does not help, and the ~0.03 residual to the
+# in-context ceiling is the cost of synthetic-vs-real, not of generator quality. **(right)** The
+# remaining gap to the fitted models is **architectural**: growing the context from 512 to 2048 rows
+# lifts the real-subtask ceiling past gradient boosting, and the generative prior at the larger
+# context passes the per-dataset fit. The route to interactions the probe identified is closed by the
+# prior; the rest is context.
+
+# %% [markdown]
 # ## Exercises
 #
 # Fill in each `# TODO`; the solution is one click away.
@@ -177,4 +209,22 @@ plt.show()
 # Q (the probe) replaces P by Q, so the residual to the fitted ceiling collapses, isolating B(P,Q) as
 # the cause of the synthetic-prior gap. The route to closing it is a richer prior over a fixed
 # geometry, not a heavier emitter.
+# </details>
+
+# %% [markdown]
+# **(medium)** Show transfer is fidelity-saturated: a more faithful generator does not raise zero-shot.
+
+# %%
+# TODO: from res above, compare gens[*]["learn"] (fidelity) to gens[*]["zs512"][0] (transfer).
+
+# %% [markdown]
+# <details><summary>Solution</summary>
+#
+# ```python
+# for g, r in res["gens"].items():
+#     print(g, "learnability", round(r["learn"], 3), "zero-shot", round(r["zs512"][0], 3))
+# ```
+# Learnability rises from ARF to the MCMC sampler while zero-shot stays near 0.76: once the prior
+# carries interactions, modeling the joint more accurately does not move the prediction. The residual
+# to the in-context ceiling is the synthetic-vs-real cost, which a better generator does not shrink.
 # </details>
